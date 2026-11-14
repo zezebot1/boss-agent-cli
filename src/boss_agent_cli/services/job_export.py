@@ -5,9 +5,6 @@ import html as _html
 import json
 from typing import Any
 
-from boss_agent_cli.api.models import field_list
-from boss_agent_cli.services.chat_utils import sanitize_csv_cell
-
 
 def prepare_export_items(items: list[dict[str, Any]], *, include_private: bool) -> list[dict[str, Any]]:
 	if include_private:
@@ -17,7 +14,7 @@ def prepare_export_items(items: list[dict[str, Any]], *, include_private: bool) 
 
 def redact_export_item(item: dict[str, Any]) -> dict[str, Any]:
 	redacted = dict(item)
-	for key in ("job_id", "job_url", "security_id", "lid", "boss_name"):
+	for key in ("job_id", "security_id", "lid", "boss_name"):
 		if key in redacted:
 			redacted[key] = "[REDACTED]"
 	return redacted
@@ -30,8 +27,8 @@ def public_html_export_item_from_api(raw: dict[str, Any]) -> dict[str, Any]:
 		"city": raw.get("cityName", ""),
 		"experience": raw.get("jobExperience", ""),
 		"education": raw.get("jobDegree", ""),
-		"skills": field_list(raw, "skills"),
-		"welfare": field_list(raw, "welfareList"),
+		"skills": raw.get("skills", []),
+		"welfare": raw.get("welfareList", []),
 	}
 
 
@@ -74,20 +71,25 @@ def write_export_file(items: list[dict[str, Any]], fmt: str, path: str) -> None:
 					row["skills"] = ", ".join(row["skills"])
 				if isinstance(row.get("welfare"), list):
 					row["welfare"] = ", ".join(row["welfare"])
-				# CSV 公式注入防护；与 chat 导出一致（剥 Tab/CR，Issue #876）。
-				row = {k: sanitize_csv_cell(str(v)) for k, v in row.items()}
+				# CSV 公式注入防护
+				row = {k: _sanitize_csv_cell(str(v)) for k, v in row.items()}
 				writer.writerow(row)
 
 
-# 向后兼容别名：旧测试与调用方按模块内私有名取用。
-_sanitize_csv_cell = sanitize_csv_cell
+def _sanitize_csv_cell(value: str) -> str:
+	"""防止 CSV 公式注入：以 =+@- 开头的值前置单引号。"""
+	if isinstance(value, str) and value and value[0] in ("=", "+", "-", "@"):
+		return f"'{value}"
+	return value
 
 
-def render_html_export(items: list[dict[str, Any]]) -> str:
-	"""将搜索结果渲染为自包含 HTML 表格字符串（export 的 -o 与 stdout 共用）。"""
+def write_html_export(items: list[dict[str, Any]], path: str) -> None:
+	"""将搜索结果导出为 HTML 表格。"""
 	esc = _html.escape
 	if not items:
-		return "<html><body><p>无数据</p></body></html>"
+		with open(path, "w", encoding="utf-8") as f:
+			f.write("<html><body><p>无数据</p></body></html>")
+		return
 
 	rows = []
 	for i, item in enumerate(items, 1):
@@ -146,10 +148,6 @@ def render_html_export(items: list[dict[str, Any]]) -> str:
   <tbody>{"".join(rows)}</tbody>
 </table>
 </body></html>"""
-	return html_content
 
-
-def write_html_export(items: list[dict[str, Any]], path: str) -> None:
-	"""将搜索结果导出为 HTML 表格文件。"""
 	with open(path, "w", encoding="utf-8") as f:
-		f.write(render_html_export(items))
+		f.write(html_content)

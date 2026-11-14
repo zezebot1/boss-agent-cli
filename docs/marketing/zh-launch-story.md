@@ -32,7 +32,8 @@
 
 ```bash
 uv tool install boss-agent-cli
-boss doctor                     # 缺浏览器内核时给出可直接执行的安装命令
+patchright install chromium
+boss doctor
 boss login
 boss search "golang" --city 上海 --welfare "双休,五险一金"
 boss detail <security_id> --job-id <job_id>
@@ -86,7 +87,7 @@ MCP 配置示例：
 
 - JSON 信封和 `boss schema` 是 Agent 契约源
 - zhipin（BOSS 直聘）为唯一注册平台，已覆盖求职者链路
-- CI 覆盖 Python 3.11 / 3.12 / 3.13 / 3.14、ruff、mypy、文档一致性和 CodeQL
+- CI 覆盖 Python 3.10 / 3.11 / 3.12 / 3.13、ruff、mypy、文档一致性和 CodeQL
 - 不引入遥测、埋点或云同步；采用度量只看 PyPI 下载量和 GitHub Insights
 
 ### 5. 链接

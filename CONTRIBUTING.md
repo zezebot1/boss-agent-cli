@@ -2,9 +2,7 @@
 
 感谢你对 boss-agent-cli 的关注！English version: [CONTRIBUTING.en.md](CONTRIBUTING.en.md)
 
-首次贡献前请先完成 [快速上手](docs/getting-started.md) 中的本地自检与开发者验证；改代码前建议先读 [架构](docs/architecture.md)，了解信封契约、平台抽象与风控边界。
-
-参与本项目（Issue、PR、Discussions）即表示同意遵守 [行为准则](CODE_OF_CONDUCT.md)。
+首次贡献前请先完成 [快速上手](docs/getting-started.md) 中的本地自检与开发者验证。
 
 ## 开发环境
 
@@ -18,13 +16,13 @@ uv run pytest tests/ -v
 uv run pre-commit install
 ```
 
-Python **≥ 3.11** 是最低要求。项目使用 [`uv`](https://github.com/astral-sh/uv) 管理依赖，`uv sync --all-extras` 会在本地 `.venv` 中安装运行时和开发依赖。
+Python **≥ 3.10** 是最低要求。项目使用 [`uv`](https://github.com/astral-sh/uv) 管理依赖，`uv sync --all-extras` 会在本地 `.venv` 中安装运行时和开发依赖。
 
 ## 编码规范
 
 - Python 源码缩进使用 **tab**。
 - `pyproject.toml` 中的 `indent-width = 4` 表示格式工具的视觉宽度，不表示改为空格缩进。
-- Python >= 3.11，使用 `X | Y` 联合类型。
+- Python >= 3.10，使用 `X | Y` 联合类型。
 - 命令输出必须保持 JSON 信封契约：stdout 只输出 Agent 可读 JSON，stderr 输出日志和进度。
 - commit message：`type: 中文描述`（feat / fix / refactor / docs / test / chore / ci）。
 - 类型检查：`uv run mypy src/boss_agent_cli`，CI 阻塞式门禁，新代码必须零 mypy 错误。
@@ -35,27 +33,14 @@ Python **≥ 3.11** 是最低要求。项目使用 [`uv`](https://github.com/ast
 
 ## 本地验证
 
-代码改动提交前先跑一键门禁（ruff + 全量离线测试 + mypy）：
-
-```bash
-uv run python scripts/quality_baseline.py
-```
-
-需要定位单步时再单独运行：
+代码改动提交前尽量运行完整矩阵：
 
 ```bash
 uv run pytest tests/ -q
-uv run ruff check src/ tests/ scripts/ mcp-server/
+uv run ruff check src/ tests/
 uv run mypy src/boss_agent_cli
 uv run boss --help
 uv run boss schema --format native
-```
-
-打开 PR 前再跑离线冒烟契约与 MCP eval（eval 只能在独立终端运行，不要嵌套在 Agent 会话里）：
-
-```bash
-BOSS_SMOKE_DRY_RUN=1 uv run python scripts/smoke_p0.py
-uv run python evals/run_eval.py --mode fixture
 ```
 
 文档改动至少运行：
@@ -85,7 +70,7 @@ git diff --check
    ```
 5. **原子提交**：每个 commit 只做一件事。
 6. **Push** 并向 `master` 发起 Pull Request。
-7. **CI 全绿**才能合并：`CI` 工作流在 PR 上跑 ruff / mypy / pre-commit 和 Python 3.11、3.12、3.13、3.14 的测试（fork 的 PR 同样会跑，不需要任何 secret），另有 CodeQL 和 GitGuardian 安全扫描。测试全部离线，不要写需要网络、真实浏览器或真实账号的测试。
+7. **CI 全绿**才能合并：`CI` 工作流在 PR 上跑 ruff / mypy / pre-commit 和 Python 3.10、3.12、3.14 的测试（fork 的 PR 同样会跑，不需要任何 secret），另有 CodeQL 和 GitGuardian 安全扫描。测试全部离线，不要写需要网络、真实浏览器或真实账号的测试。
 
 维护者会使用 squash merge，所以最终 squash 标题也要遵守上面的 commit 格式。
 
@@ -118,41 +103,23 @@ git diff --check
 - **Mock 外部 I/O**：`AuthManager`、`BossClient`、`CacheStore`、`AIService` 是 mock 边界，测试不应真正调用 BOSS 直聘 API。
 - **错误路径对等**：每条成功路径至少对应一条错误路径测试（认证过期、限流、参数非法等）。
 
-## 离线 MCP 评测
-
-`evals/` 提供 fixture-first 的可复现评测，用来比较接入本 CLI 的 MCP Agent 与基线 Agent 在四个场景上的记录证据（福利筛选 / 详情+候选池 / 平台风控停止 / 错误恢复），各场景的通过判据与失败信号见 [`evals/README.md`](evals/README.md) 的场景表。
-
-默认 `fixture` 模式完全离线：不调用平台、不需要登录态。**必须在该独立终端运行，不要嵌套在 Claude Code / Codex 等 Agent 会话里**——嵌套会挂起或产生假的「0 触发」结果。
-
-```bash
-uv run python evals/run_eval.py --mode fixture
-```
-
-预期输出 `4/4 passed`，结果写入 `evals/results/<时间戳>-fixture.json`。评测是本地证据，不进入 CI。
-
 ## 维护者文档
 
 - [Release Checklist](docs/maintainer/release-checklist.md)
 - [Labels And Triage](docs/maintainer/labels.md)
 - [Branch Protection](docs/maintainer/branch-protection.md)
-- [Smoke Testing](docs/maintainer/smoke-testing.md)
-- [README Badge Policy](docs/maintainer/readme-badge-policy.md)
-- [Architecture Decisions](docs/adr/README.md)
 
 ## 添加新命令
 
-1. 在 `src/boss_agent_cli/commands/` 下新建命令模块；可复用且不依赖 Click / display 的业务逻辑放到 `services/`
+1. 在 `src/boss_agent_cli/commands/` 下新建文件
 2. 在 `commands/register.py` 中注册命令（`register_candidate_commands` / `register_recruiter_commands`；`main.py` 只保留全局选项，不直接挂命令）
 3. 在 `src/boss_agent_cli/schema/data.py`（`SCHEMA_DATA["commands"]`）中添加命令描述；顶层命令数变化时同步 `SCHEMA_DATA["description"]` 中的「共 N 个顶层命令」计数（有测试断言计数与命令表长度一致）
-4. 在 `tests/test_commands.py` 或按命令名新建测试文件，覆盖成功与错误路径，并确认命令满足 `tests/test_cli_invariants.py` 的信封契约
+4. 在 `tests/test_commands.py` 或按命令名新建测试文件
 5. 更新 `docs/commands.md` 和 `docs/commands.en.md`（命令速查表）
-6. 更新 `docs/capability-matrix.md` / `docs/capability-matrix.en.md` 中的命令计数；`tests/test_agent_docs.py` 对这些计数字符串有硬编码断言，需一并更新
-7. 更新 `README.md` 和 `README.en.md`（命令参考表与计数），同步 `llms.txt` / `demo/llms.txt` 及 `demo/index.html` 的能力计数
-8. 将新增 Python 模块加入 `pyproject.toml` 的 `[[tool.mypy.overrides]]` 严格模块列表，运行 `uv run mypy src/boss_agent_cli`
-9. 如果命令需要通过 MCP 暴露，在 `src/boss_agent_cli/mcp_tools.py` 的 `TOOLS` 中添加 Tool 定义，在 `src/boss_agent_cli/mcp_args.py` 的 `_build_args` 中添加参数映射。工具名与合规命令标识对不上时（如 `boss_hr_*` 对应 `recruiter-*`），在 `mcp_tools.py` 的 `_MCP_TOOL_COMPLIANCE_COMMAND_OVERRIDES` 登记。`mcp_server.py` 保留服务器与兼容再导出，`mcp-server/server.py` 是手工维护的 re-export 清单；新增兼容公开符号时同步两处。工具总数变化时同步 `README.en.md` 中的 "MCP server with N tools" 及其他能力计数，并确认实际 `tools/list` 与 `mcp_tools.TOOLS` 逐名相等：`uv run pytest tests/test_mcp_server_protocol.py tests/test_mcp_handler_registration.py -q`
-10. 在 `CHANGELOG.md` 的 `[Unreleased]` 下记录本次改动
-
-`AGENTS.md` / `CLAUDE.md` 是被 `.gitignore` 排除的本地说明文件，不是贡献 PR 的必需文件；公开工程与架构约定见本指南和 [架构文档](docs/architecture.md)。
+6. 更新 `AGENTS.md`（CLI 不变量契约中的命令数）与 `docs/capability-matrix.md` / `docs/capability-matrix.en.md` 中的命令计数；`tests/test_agent_docs.py` 对这些计数字符串有硬编码断言，需一并更新
+7. 更新 `README.md` 和 `README.en.md`（命令参考表）
+8. 更新对应模块的 `CLAUDE.md`
+9. 如果命令对 Agent 通过 MCP 调用有用，还需在 `src/boss_agent_cli/mcp_server.py` 的 `TOOLS` 列表加 Tool 定义、在 `_build_args` 函数加分支；工具名与合规命令标识对不上时（如 `boss_hr_*` 系对应 `recruiter-*`）要登记 `_MCP_TOOL_COMPLIANCE_COMMAND_OVERRIDES`，否则低风险过滤不生效；`mcp-server/server.py` 是手工维护的 re-export 清单，新增公开符号需补一行；工具总数变化时同步 `README.en.md` 中的 "MCP server with N tools"（有测试按 `len(TOOLS)` 动态断言）
 
 ## 新增 AI provider
 
@@ -216,4 +183,4 @@ uv run python evals/run_eval.py --mode fixture
 
 ## 有问题？
 
-欢迎在 [Discussions](https://github.com/can4hou6joeng4/boss-agent-cli/discussions) 发帖，或在相关 [Issue](https://github.com/can4hou6joeng4/boss-agent-cli/issues) 下留言；完整的求助渠道与提问清单见 [获取支持](SUPPORT.md)。
+欢迎在 [Discussions](https://github.com/can4hou6joeng4/boss-agent-cli/discussions) 发帖，或在相关 [Issue](https://github.com/can4hou6joeng4/boss-agent-cli/issues) 下留言。

@@ -1,39 +1,15 @@
-from typing import Any
-
 import click
 
-from boss_agent_cli.api.client import AuthError, PlatformRiskError
-from boss_agent_cli.api.request_budget import RequestBudgetExceeded
+from boss_agent_cli.api.client import AuthError
 from boss_agent_cli.auth.manager import AuthManager, AuthRequired, TokenRefreshFailed
 from boss_agent_cli.commands._platform import get_platform_instance
-from boss_agent_cli.display import (
-	INTERNAL_ERROR_TYPES,
-	auth_required_hints,
-	boss_command_for_ctx,
-	error_contract_for_code,
-	handle_browser_kernel_missing,
-	handle_error_output,
-	handle_not_supported,
-	handle_output,
-	handle_platform_error_output,
-	login_action_for_ctx,
-	platform_error_contract,
-	render_sectioned_record,
-	risk_error_message,
-)
-from boss_agent_cli.services.browser_runtime import is_browser_kernel_missing
-from boss_agent_cli.services.pagination import UNKNOWN_HAS_MORE_OPERATOR_ACTION, list_pagination, rows_from
-
-
-def _hint_command(ctx: click.Context, command: str) -> str:
-	"""个人记录的翻页与后继操作沿用当前账号的数据目录。"""
-	return boss_command_for_ctx(ctx, command, include_data_dir=True)
+from boss_agent_cli.display import boss_command_for_ctx, handle_error_output, handle_not_supported, handle_output, handle_platform_error_output, login_action_for_ctx, render_sectioned_record
 
 
 @click.command("me")
 @click.option("--section", default=None, type=click.Choice(["user", "resume", "expect", "deliver"]),
 	help="只获取指定部分（不指定则获取全部）")
-@click.option("--deliver-page", default=1, type=click.IntRange(min=1), help="投递记录页码")
+@click.option("--deliver-page", default=1, type=int, help="投递记录页码")
 @click.pass_context
 def me_cmd(ctx: click.Context, section: str | None, deliver_page: int) -> None:
 	"""获取当前登录用户的个人信息、简历、求职期望、投递记录"""
@@ -44,7 +20,6 @@ def me_cmd(ctx: click.Context, section: str | None, deliver_page: int) -> None:
 		auth = AuthManager(data_dir, logger=logger, platform=ctx.obj.get("platform", "zhipin"))
 		with get_platform_instance(ctx, auth) as platform:
 			result = {}
-			pagination: dict[str, Any] | None = None
 
 			sections = [section] if section else ["user", "resume", "expect", "deliver"]
 
@@ -117,62 +92,21 @@ def me_cmd(ctx: click.Context, section: str | None, deliver_page: int) -> None:
 					return
 				zp_data = platform.unwrap_data(resp) or {}
 				result["deliver"] = zp_data
-				# 汇总四段信息时，投递列表的页码不能代表整份载荷。
-				if section == "deliver":
-					pagination = list_pagination(zp_data, page=deliver_page, rows=rows_from(zp_data, "list"))
-
-			success_hints: dict[str, Any] = {
-				"next_actions": [
-					_hint_command(ctx, "search <关键词> --city <城市>"),
-					_hint_command(ctx, "recommend"),
-				],
-			}
-			if pagination is not None:
-				if pagination["has_more"] is True:
-					success_hints["next_actions"].append(_hint_command(
-						ctx, f"me --section deliver --deliver-page {pagination['page'] + 1}",
-					))
-				elif pagination["has_more"] is None:
-					success_hints["operator_actions"] = [UNKNOWN_HAS_MORE_OPERATOR_ACTION]
 
 			handle_output(
 				ctx, "me", result,
-				pagination=pagination,
 				render=lambda d: render_sectioned_record(d, title="me"),
-				hints=success_hints,
+				hints={
+					"next_actions": [
+						boss_command_for_ctx(ctx, "search <关键词> --city <城市>"),
+						boss_command_for_ctx(ctx, "recommend"),
+					],
+				},
 			)
 
 	except (AuthRequired, TokenRefreshFailed):
-		handle_error_output(ctx, "me", code="AUTH_REQUIRED", message="未登录", recoverable=True, recovery_action=login_action_for_ctx(ctx), hints=auth_required_hints(ctx))
+		handle_error_output(ctx, "me", code="AUTH_REQUIRED", message="未登录", recoverable=True, recovery_action=login_action_for_ctx(ctx))
 	except AuthError:
-		handle_error_output(ctx, "me", code="AUTH_EXPIRED", message="登录态过期", recoverable=True, recovery_action=login_action_for_ctx(ctx), hints=auth_required_hints(ctx))
-	except PlatformRiskError as e:
-		# me 没有 @handle_auth_errors 包裹：风控异常原本会掉进下面的
-		# NETWORK_ERROR 兜底，变成 recoverable=true +「重试」，违反风控硬边界。
-		recoverable, recovery_action, hints = platform_error_contract(e.code, ctx=ctx)
-		handle_error_output(
-			ctx,
-			"me",
-			code=e.code,
-			message=risk_error_message(e.code),
-			recoverable=recoverable,
-			recovery_action=recovery_action,
-			details=e.details or None,
-			hints=hints,
-		)
-	except RequestBudgetExceeded as e:
-		recoverable, recovery_action = error_contract_for_code(e.code)
-		handle_error_output(
-			ctx, "me", code=e.code, message=str(e), recoverable=recoverable,
-			recovery_action=recovery_action, details=e.details,
-		)
-	except INTERNAL_ERROR_TYPES as e:
-		recoverable, recovery_action = error_contract_for_code("INTERNAL_ERROR")
-		handle_error_output(ctx, "me", code="INTERNAL_ERROR", message=f"{type(e).__name__}: {e}", recoverable=recoverable, recovery_action=recovery_action)
+		handle_error_output(ctx, "me", code="AUTH_EXPIRED", message="登录态过期", recoverable=True, recovery_action=login_action_for_ctx(ctx))
 	except Exception as e:
-		# 内核缺失是确定性失败：路径没变时重试永远同一结果，不能兜成
-		# NETWORK_ERROR +「重试」让 Agent 反复打平台（同 search 等装饰器路径）。
-		if is_browser_kernel_missing(str(e)):
-			handle_browser_kernel_missing(ctx, "me", e)
-			return
 		handle_error_output(ctx, "me", code="NETWORK_ERROR", message=str(e), recoverable=True, recovery_action="重试")

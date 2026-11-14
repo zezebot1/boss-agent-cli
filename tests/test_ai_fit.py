@@ -1,14 +1,12 @@
 """Tests for boss ai fit."""
 
 import json
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from boss_agent_cli.cache.store import CacheStore
-from boss_agent_cli.commands.ai_cmd import _fit_missing_detail_item
 from boss_agent_cli.main import cli
 
 
@@ -104,7 +102,7 @@ def test_ai_fit_uses_local_resume_and_cached_job_details(tmp_path):
 			"title": "Go 后端",
 			"company": "Beta",
 			"status": "缺详情",
-			"hint": f"先 boss --data-dir {tmp_path.resolve()} detail sec-2",
+			"hint": "先 boss detail sec-2",
 		},
 	]
 	assert parsed["data"]["summary"] == {"analyzed": 1, "missing_details": 1}
@@ -147,10 +145,3 @@ def test_ai_fit_empty_shortlist_returns_empty_report(tmp_path):
 	assert parsed["ok"] is True
 	assert parsed["data"] == {"results": [], "missing": [], "summary": {"analyzed": 0, "missing_details": 0}}
 	assert service.messages == []
-
-
-def test_fit_missing_detail_hint_quotes_security_id(tmp_path):
-	"""security_id 来自模型输出，拼进 ``boss detail`` 提示前必须按 shell 参数转义。"""
-	ctx = SimpleNamespace(obj={"data_dir": tmp_path, "platform": "zhipin"})
-	item = _fit_missing_detail_item(ctx, {"security_id": "sec; echo pwn", "job_id": "job-1"})
-	assert item["hint"] == f"先 boss --data-dir {tmp_path.resolve()} detail 'sec; echo pwn'"

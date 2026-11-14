@@ -1,25 +1,18 @@
-from typing import Any
-
 import click
 
-from boss_agent_cli.api.models import JobItem, field_list
+from boss_agent_cli.api.models import JobItem
 from boss_agent_cli.auth.manager import AuthManager
 from boss_agent_cli.cache.store import CacheStore
 from boss_agent_cli.compliance import require_compliance_allowed
-from boss_agent_cli.commands._platform import account_scope, get_platform_instance
-from boss_agent_cli.display import boss_command_for_ctx, handle_auth_errors, handle_not_supported, handle_output, handle_platform_error_output, render_job_table, show_command_for_ctx
-from boss_agent_cli.index_cache import get_index_snapshot, try_save_index
+from boss_agent_cli.commands._platform import get_platform_instance
+from boss_agent_cli.display import handle_auth_errors, handle_not_supported, handle_output, handle_platform_error_output, render_job_table
+from boss_agent_cli.index_cache import try_save_index
 from boss_agent_cli.match_score import score_job_dict
 from boss_agent_cli.services.job_identity import deduplicate_job_result
 
 
-def _hint_command(ctx: click.Context, command: str) -> str:
-	"""推荐翻页与后继操作沿用当前登录态和索引目录。"""
-	return boss_command_for_ctx(ctx, command, include_data_dir=True)
-
-
 @click.command("recommend")
-@click.option("--page", default=1, type=click.IntRange(min=1), help="页码")
+@click.option("--page", default=1, type=int, help="页码")
 @click.option("--with-score", is_flag=True, default=False, help="附加匹配分和原因")
 @click.pass_context
 @handle_auth_errors("recommend")
@@ -32,7 +25,6 @@ def recommend_cmd(ctx: click.Context, page: int, with_score: bool) -> None:
 	logger = ctx.obj["logger"]
 
 	auth = AuthManager(data_dir, logger=logger, platform=ctx.obj.get("platform", "zhipin"))
-	account = account_scope(auth)
 	with get_platform_instance(ctx, auth) as platform:
 		with CacheStore(data_dir / "cache" / "boss_agent.db") as cache:
 			expect_data = None
@@ -53,52 +45,40 @@ def recommend_cmd(ctx: click.Context, page: int, with_score: bool) -> None:
 				handle_platform_error_output(ctx, "recommend", platform, raw, fallback_message="推荐职位获取失败")
 				return
 			platform_data = platform.unwrap_data(raw) or {}
-			job_list = field_list(platform_data, "jobList")
+			job_list = platform_data.get("jobList", [])
 
 			items = []
 			for raw_item in deduplicate_job_result(job_list):
 				item = JobItem.from_api(raw_item)
-				item.greeted = cache.is_greeted(item.security_id, job_id=item.job_id, account=account)
+				item.greeted = cache.is_greeted(item.security_id)
 				item_dict = item.to_dict()
 				if with_score:
 					item_dict = score_job_dict(item_dict, criteria=None, expect_data=expect_data)
 				items.append(item_dict)
 
-		saved = try_save_index(data_dir, items, source="recommend", page=page, logger=logger)
+		try_save_index(data_dir, items, source="recommend", logger=logger)
 
 		raw_has_more = platform_data.get("hasMore")
 		has_more = raw_has_more if isinstance(raw_has_more, bool) else None
-		pagination: dict[str, Any] = {
+		pagination = {
 			"page": page,
 			"has_more": has_more,
 			"has_more_source": "platform_hasMore" if has_more is not None else "unknown",
 			"total": len(items),
 			"total_kind": "returned_page_count",
 		}
-		if saved:
-			snapshot = get_index_snapshot(data_dir)
-			if snapshot is not None:
-				pagination["index_snapshot"] = snapshot
 		hints = {
 			"next_actions": [
-				_hint_command(ctx, "detail <security_id>"),
-				_hint_command(ctx, "apply <security_id> <job_id>"),
-				_hint_command(ctx, "greet <security_id> <job_id>"),
+				"使用 boss detail <security_id> 查看职位详情",
+				"使用 boss apply <security_id> <job_id> 建立会话，或 boss greet <security_id> <job_id> 沟通",
 			],
 		}
 		if has_more is True:
-			# 翻页命令必须保留本次的 --with-score：只写 --page 时下一页的
-			# match_score 全部消失，Agent 会以为排序依据变了。
-			next_page = f"recommend --page {page + 1}"
-			if with_score:
-				next_page += " --with-score"
-			hints["next_actions"].append(_hint_command(ctx, next_page))
+			hints["next_actions"].append(f"使用 boss recommend --page {page + 1} 查看下一页")
 		elif has_more is None:
 			hints["operator_actions"] = ["平台未提供可靠的下一页标记，不能仅凭本页数量判断是否还有结果"]
 		handle_output(
 			ctx, "recommend", items,
-			render=lambda data: render_job_table(
-				data, "recommend", page=page, show_command=show_command_for_ctx(ctx, index_saved=saved),
-			),
+			render=lambda data: render_job_table(data, "recommend", page=page),
 			pagination=pagination, hints=hints,
 		)

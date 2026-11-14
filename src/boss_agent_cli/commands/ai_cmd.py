@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import click
 
-from boss_agent_cli.ai.config import AIConfigStore, PROVIDER_BASE_URLS, provider_endpoint
+from boss_agent_cli.ai.config import AIConfigStore
 from boss_agent_cli.ai.prompts import (
 	CHAT_COACH_PROMPT,
 	CHAT_REPLY_PROMPT,
@@ -22,15 +22,13 @@ from boss_agent_cli.ai.prompts import (
 	RESUME_SUGGEST_PROMPT,
 	SUGGEST_KEYWORDS_PROMPT,
 )
-from boss_agent_cli.ai.service import AIService, AIServiceError, recovery_action_for
+from boss_agent_cli.ai.service import AIService, AIServiceError
 from boss_agent_cli.cache.store import CacheStore
 from boss_agent_cli.display import (
-	boss_command_for_ctx,
 	handle_error_output,
 	handle_output,
 	render_action_result,
 	render_ai_result,
-	shell_argument,
 )
 from boss_agent_cli.resume.models import resume_to_text
 from boss_agent_cli.resume.store import ResumeStore
@@ -42,11 +40,6 @@ def _get_ai_config_store(ctx: click.Context) -> AIConfigStore:
 
 def _get_resume_store(ctx: click.Context) -> ResumeStore:
 	return ResumeStore(ctx.obj["data_dir"] / "resumes")
-
-
-def _hint_command(ctx: click.Context, command: str) -> str:
-	"""AI 命令的后继与恢复提示沿用本地简历、缓存与 AI 配置所在的数据目录。"""
-	return boss_command_for_ctx(ctx, command, include_data_dir=True)
 
 
 def _create_ai_service(ctx: click.Context) -> AIService | None:
@@ -72,26 +65,13 @@ def _require_ai_service(ctx: click.Context) -> AIService | None:
 	"""获取 AIService，未配置时输出错误信封并返回 None。"""
 	svc = _create_ai_service(ctx)
 	if svc is None:
-		# provider / model / api_key 都在、只缺端点时，笼统的「AI 服务未配置」会把人
-		# 引去重填 key；真正要改的是 provider 名或补 base_url。
-		provider = _get_ai_config_store(ctx).unresolved_provider()
-		if provider is not None:
-			handle_error_output(
-				ctx, "ai",
-				code="AI_NOT_CONFIGURED",
-				message=f"AI provider {provider!r} 没有可用端点（provider 未登记或未设置 --base-url）",
-				recoverable=True,
-				recovery_action=_hint_command(ctx, "ai config --provider <已登记的 provider>")
-				+ "，或使用 --base-url 指向自建 OpenAI 兼容端点",
-			)
-		else:
-			handle_error_output(
-				ctx, "ai",
-				code="AI_NOT_CONFIGURED",
-				message="AI 服务未配置",
-				recoverable=True,
-				recovery_action=_hint_command(ctx, "ai config --provider <provider> --model <model> --api-key <key>"),
-			)
+		handle_error_output(
+			ctx, "ai",
+			code="AI_NOT_CONFIGURED",
+			message="AI 服务未配置",
+			recoverable=True,
+			recovery_action="boss ai config --provider <provider> --model <model> --api-key <key>",
+		)
 		ctx.exit(1)
 		return None
 	return svc
@@ -112,58 +92,6 @@ def _load_resume_text(ctx: click.Context, resume_name: str) -> str | None:
 	return resume_to_text(resume)
 
 
-def _read_text_argument(ctx: click.Context, value: str) -> str | None:
-	"""展开 `@文件路径` 参数；读不出来时输出信封并返回 None。
-
-	`read_text` 对 GBK 保存的 JD、误选的 PDF/图片会抛 `UnicodeDecodeError`，
-	传目录会抛 `IsADirectoryError`，权限不足会抛 `PermissionError`；
-	这些都不该变成 traceback。
-	"""
-	if not value.startswith("@"):
-		return value
-	file_path = Path(value[1:])
-	if not file_path.exists():
-		handle_error_output(
-			ctx,
-			"ai",
-			code="INVALID_PARAM",
-			message=f"文件 '{file_path}' 不存在",
-			recovery_action="检查 @ 后面的文件路径是否存在后重试",
-		)
-		ctx.exit(1)
-		return None
-	if file_path.is_dir():
-		handle_error_output(
-			ctx,
-			"ai",
-			code="INVALID_PARAM",
-			message=f"'{file_path}' 是目录，需要传入文件路径",
-			recovery_action="把 @ 后面的目录换成具体的 UTF-8 文本文件路径后重试",
-		)
-		ctx.exit(1)
-		return None
-	try:
-		return file_path.read_text(encoding="utf-8")
-	except UnicodeDecodeError:
-		handle_error_output(
-			ctx,
-			"ai",
-			code="INVALID_PARAM",
-			message=f"文件 '{file_path}' 不是 UTF-8 编码的文本；请先转存为 UTF-8 后重试",
-			recovery_action="先把文件转存为 UTF-8 文本，再重新传入 @<文件> 路径",
-		)
-		ctx.exit(1)
-		return None
-	except OSError as exc:
-		handle_error_output(
-			ctx, "ai",
-			code="LOCAL_IO_ERROR",
-			message=f"读取 {file_path} 失败: {exc.strerror or exc}",
-		)
-		ctx.exit(1)
-		return None
-
-
 def _call_ai(ctx: click.Context, svc: AIService, prompt: str) -> dict[str, Any] | None:
 	"""调用 AI 并解析 JSON 结果，失败时输出错误信封。"""
 	try:
@@ -177,11 +105,7 @@ def _call_ai(ctx: click.Context, svc: AIService, prompt: str) -> dict[str, Any] 
 			code="AI_API_ERROR",
 			message=f"AI 服务调用失败: {exc}",
 			recoverable=True,
-			recovery_action=recovery_action_for(
-				exc,
-				"检查网络连接和密钥配置，重试",
-				config_command=_hint_command(ctx, "ai config"),
-			),
+			recovery_action="检查网络连接和密钥配置，重试",
 		)
 		ctx.exit(1)
 		return None
@@ -194,7 +118,7 @@ def _call_ai(ctx: click.Context, svc: AIService, prompt: str) -> dict[str, Any] 
 		text = "\n".join(lines).strip()
 
 	try:
-		parsed = json.loads(text)
+		return cast("dict[str, Any]", json.loads(text))
 	except json.JSONDecodeError:
 		handle_error_output(
 			ctx, "ai",
@@ -205,28 +129,11 @@ def _call_ai(ctx: click.Context, svc: AIService, prompt: str) -> dict[str, Any] 
 		)
 		ctx.exit(1)
 		return None
-	if not isinstance(parsed, dict):
-		# 顶层是数组 / 字符串 / 数字同样是解析失败：调用方会在
-		# `result.setdefault(...)` 处抛 AttributeError，把信封变成 traceback。
-		handle_error_output(
-			ctx, "ai",
-			code="AI_PARSE_ERROR",
-			message=f"AI 返回结果不是 JSON 对象（收到 {type(parsed).__name__}）",
-			recoverable=True,
-			recovery_action="重试（模型输出不稳定时可能发生）",
-		)
-		ctx.exit(1)
-		return None
-	return cast("dict[str, Any]", parsed)
 
 
-def _fit_missing_detail_item(ctx: click.Context, item: dict[str, Any]) -> dict[str, Any]:
+def _fit_missing_detail_item(item: dict[str, Any]) -> dict[str, Any]:
 	security_id = str(item.get("security_id") or "")
-	hint = (
-		f"先 {_hint_command(ctx, f'detail {shell_argument(security_id)}')}"
-		if security_id
-		else f"先 {_hint_command(ctx, 'detail <security_id>')}"
-	)
+	hint = f"先 boss detail {security_id}" if security_id else "先 boss detail <security_id>"
 	return {
 		"job_id": item.get("job_id", ""),
 		"security_id": security_id,
@@ -271,8 +178,8 @@ def ai_group() -> None:
 @click.option("--model", default=None, help="模型名称（如 gpt-4o / claude-sonnet-4.5 / deepseek-chat）")
 @click.option("--api-key", default=None, help="API 密钥（将加密存储）")
 @click.option("--base-url", default=None, help="自定义 API 基础地址（provider=custom 或自建代理时使用）")
-@click.option("--temperature", default=None, type=click.FloatRange(min=0), help="生成温度")
-@click.option("--max-tokens", default=None, type=click.IntRange(min=1), help="最大令牌数")
+@click.option("--temperature", default=None, type=float, help="生成温度")
+@click.option("--max-tokens", default=None, type=int, help="最大令牌数")
 @click.pass_context
 def ai_config_cmd(ctx: click.Context, provider: str | None, model: str | None, api_key: str | None, base_url: str | None, temperature: float | None, max_tokens: int | None) -> None:
 	"""查看或设置 AI 服务配置"""
@@ -292,41 +199,14 @@ def ai_config_cmd(ctx: click.Context, provider: str | None, model: str | None, a
 		handle_output(
 			ctx, "ai-config", config,
 			render=lambda d: render_action_result(
-				d, title="ai config", next_steps=[
-					_hint_command(ctx, "ai local status"),
-					_hint_command(ctx, "ai analyze-jd <security_id>"),
-				]
+				d, title="ai config", next_steps=["boss ai local status", "boss ai analyze-jd <security_id>"]
 			),
 			hints={"next_actions": [
-				_hint_command(ctx, "ai config --provider openai --model gpt-4o --api-key <key>"),
-				_hint_command(ctx, "ai local configure --runtime ollama --model qwen3:14b"),
+				"boss ai config --provider openai --model gpt-4o --api-key <key>",
+				"boss ai local configure --runtime ollama --model qwen3:14b",
 			]},
 		)
 		return
-
-	# provider 写错（如 `openai-cn`）或 provider=custom 没给 base_url 时，端点解析为
-	# None：写进配置后每条 AI 命令都只会回「AI 服务未配置」，用户看不出是 provider
-	# 名的问题，而配置和 api_key 已经落盘。写入前先拒绝，并列出登记表里的取值。
-	if provider is not None:
-		stored_base_url = store.load_config().get("ai_base_url")
-		effective_base_url = base_url if base_url is not None else stored_base_url
-		if provider_endpoint(provider, effective_base_url) is None:
-			if provider == "custom":
-				message = "provider 'custom' 需要同时传 --base-url（自建 OpenAI 兼容端点）"
-			else:
-				message = f"未知 AI provider: {provider!r}，可选: {', '.join(sorted(PROVIDER_BASE_URLS))}"
-			handle_error_output(
-				ctx, "ai-config",
-				code="INVALID_PARAM",
-				message=message,
-				recovery_action="按 next_actions 选择可用的 provider 参数后重试",
-				hints={"next_actions": [
-					_hint_command(ctx, "ai config --provider custom --base-url <url> --model <model> --api-key <key>"),
-					_hint_command(ctx, "ai config"),
-				]},
-			)
-			ctx.exit(1)
-			return
 
 	# 有参数时更新配置
 	updates: dict[str, Any] = {}
@@ -354,12 +234,8 @@ def ai_config_cmd(ctx: click.Context, provider: str | None, model: str | None, a
 			# 在同一屏内可确认，而不是要再跑一次 boss ai config 才看得到。
 			"resolved_base_url": store.get_base_url(),
 		},
-		render=lambda d: render_action_result(d, title="ai config", next_steps=[_hint_command(ctx, "ai config")]),
-		hints={"next_actions": [
-			_hint_command(ctx, "ai config"),
-			_hint_command(ctx, "ai local status"),
-			_hint_command(ctx, "ai analyze-jd <security_id> --resume <name>"),
-		]},
+		render=lambda d: render_action_result(d, title="ai config", next_steps=["boss ai config"]),
+		hints={"next_actions": ["boss ai config", "boss ai local status", "boss ai analyze-jd <security_id> --resume <name>"]},
 	)
 
 
@@ -377,10 +253,13 @@ def ai_analyze_jd_cmd(ctx: click.Context, jd_text: str, resume_name: str) -> Non
 		return
 
 	# 支持 @file 语法读取文件
-	resolved = _read_text_argument(ctx, jd_text)
-	if resolved is None:
-		return
-	jd_text = resolved
+	if jd_text.startswith("@"):
+		file_path = Path(jd_text[1:])
+		if not file_path.exists():
+			handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+			ctx.exit(1)
+			return
+		jd_text = file_path.read_text(encoding="utf-8")
 
 	resume_text = _load_resume_text(ctx, resume_name)
 	if resume_text is None:
@@ -395,8 +274,8 @@ def ai_analyze_jd_cmd(ctx: click.Context, jd_text: str, resume_name: str) -> Non
 		ctx, "ai-analyze-jd", result,
 		render=lambda d: render_ai_result(d, title="ai-analyze-jd"),
 		hints={"next_actions": [
-			_hint_command(ctx, f"ai optimize {shell_argument(resume_name)} --jd <jd_text>"),
-			_hint_command(ctx, f"ai suggest {shell_argument(resume_name)} --jd <jd_text>"),
+			f"boss ai optimize {resume_name} --jd <jd_text>",
+			f"boss ai suggest {resume_name} --jd <jd_text>",
 		]},
 	)
 
@@ -422,7 +301,7 @@ def ai_polish_cmd(ctx: click.Context, resume_name: str) -> None:
 	handle_output(
 		ctx, "ai-polish", result,
 		render=lambda d: render_ai_result(d, title="ai-polish"),
-		hints={"next_actions": [_hint_command(ctx, f"resume show {shell_argument(resume_name)}")]},
+		hints={"next_actions": [f"boss resume show {resume_name}"]},
 	)
 
 
@@ -436,10 +315,13 @@ def ai_optimize_cmd(ctx: click.Context, resume_name: str, jd_text: str) -> None:
 	if svc is None:
 		return
 
-	resolved = _read_text_argument(ctx, jd_text)
-	if resolved is None:
-		return
-	jd_text = resolved
+	if jd_text.startswith("@"):
+		file_path = Path(jd_text[1:])
+		if not file_path.exists():
+			handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+			ctx.exit(1)
+			return
+		jd_text = file_path.read_text(encoding="utf-8")
 
 	resume_text = _load_resume_text(ctx, resume_name)
 	if resume_text is None:
@@ -454,8 +336,8 @@ def ai_optimize_cmd(ctx: click.Context, resume_name: str, jd_text: str) -> None:
 		ctx, "ai-optimize", result,
 		render=lambda d: render_ai_result(d, title="ai-optimize"),
 		hints={"next_actions": [
-			_hint_command(ctx, f"resume show {shell_argument(resume_name)}"),
-			_hint_command(ctx, f"resume export {shell_argument(resume_name)} --format pdf"),
+			f"boss resume show {resume_name}",
+			f"boss resume export {resume_name} --format pdf",
 		]},
 	)
 
@@ -470,10 +352,13 @@ def ai_suggest_cmd(ctx: click.Context, resume_name: str, jd_text: str) -> None:
 	if svc is None:
 		return
 
-	resolved = _read_text_argument(ctx, jd_text)
-	if resolved is None:
-		return
-	jd_text = resolved
+	if jd_text.startswith("@"):
+		file_path = Path(jd_text[1:])
+		if not file_path.exists():
+			handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+			ctx.exit(1)
+			return
+		jd_text = file_path.read_text(encoding="utf-8")
 
 	resume_text = _load_resume_text(ctx, resume_name)
 	if resume_text is None:
@@ -488,8 +373,8 @@ def ai_suggest_cmd(ctx: click.Context, resume_name: str, jd_text: str) -> None:
 		ctx, "ai-suggest", result,
 		render=lambda d: render_ai_result(d, title="ai-suggest"),
 		hints={"next_actions": [
-			_hint_command(ctx, f"ai optimize {shell_argument(resume_name)} --jd <jd_text>"),
-			_hint_command(ctx, f"resume show {shell_argument(resume_name)}"),
+			f"boss ai optimize {resume_name} --jd <jd_text>",
+			f"boss resume show {resume_name}",
 		]},
 	)
 
@@ -526,7 +411,7 @@ def ai_fit_cmd(ctx: click.Context, resume_name: str, limit: int) -> None:
 					"description": description,
 				})
 			else:
-				missing.append(_fit_missing_detail_item(ctx, item))
+				missing.append(_fit_missing_detail_item(item))
 
 	if not shortlist:
 		handle_output(
@@ -534,7 +419,7 @@ def ai_fit_cmd(ctx: click.Context, resume_name: str, limit: int) -> None:
 			"ai-fit",
 			{"results": [], "missing": [], "summary": {"analyzed": 0, "missing_details": 0}},
 			render=lambda d: render_ai_result(d, title="ai-fit"),
-			hints={"next_actions": [_hint_command(ctx, "shortlist add <security_id> <job_id>")]},
+			hints={"next_actions": ["boss shortlist add <security_id> <job_id>"]},
 		)
 		return
 
@@ -544,11 +429,7 @@ def ai_fit_cmd(ctx: click.Context, resume_name: str, limit: int) -> None:
 			"ai-fit",
 			{"results": [], "missing": missing, "summary": {"analyzed": 0, "missing_details": len(missing)}},
 			render=lambda d: render_ai_result(d, title="ai-fit"),
-			hints={"next_actions": [_hint_command(ctx, "detail <security_id>")],
-				"operator_actions": [
-					f"候选池职位缺少详情缓存，先逐个 {_hint_command(ctx, 'detail <security_id>')} 后再重试 "
-					f"{_hint_command(ctx, f'ai fit --resume {shell_argument(resume_name)}')}"
-				]},
+			hints={"next_actions": ["先对候选池职位执行 boss detail <security_id> 缓存详情后重试"]},
 		)
 		return
 
@@ -567,7 +448,7 @@ def ai_fit_cmd(ctx: click.Context, resume_name: str, limit: int) -> None:
 		"ai-fit",
 		result,
 		render=lambda d: render_ai_result(d, title="ai-fit"),
-		hints={"next_actions": [_hint_command(ctx, f"ai optimize {shell_argument(resume_name)} --jd <jd_text>")]},
+		hints={"next_actions": [f"boss ai optimize {resume_name} --jd <jd_text>"]},
 	)
 
 
@@ -587,10 +468,13 @@ def ai_reply_cmd(ctx: click.Context, recruiter_message: str, context: str, resum
 		return
 
 	def _resolve_text(value: str) -> str:
-		resolved = _read_text_argument(ctx, value)
-		if resolved is None:
-			ctx.exit(1)
-		return resolved
+		if value.startswith("@"):
+			file_path = Path(value[1:])
+			if not file_path.exists():
+				handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+				ctx.exit(1)
+			return file_path.read_text(encoding="utf-8")
+		return value
 
 	recruiter_message = _resolve_text(recruiter_message)
 	context_text = _resolve_text(context) if context else "（无）"
@@ -616,10 +500,8 @@ def ai_reply_cmd(ctx: click.Context, recruiter_message: str, context: str, resum
 		ctx, "ai-reply", result,
 		render=lambda d: render_ai_result(d, title="ai-reply"),
 		hints={"next_actions": [
-			_hint_command(ctx, "chatmsg <uid>"),
-		], "operator_actions": [
-			"复制草稿到 BOSS 聊天框手动发送",
-			f"uid 见 {_hint_command(ctx, 'chat')} 输出",
+			"复制草稿到 BOSS 聊天框发送",
+			"boss chatmsg <uid> 查看完整聊天历史（uid 见 boss chat 输出）",
 		]},
 	)
 
@@ -627,7 +509,7 @@ def ai_reply_cmd(ctx: click.Context, recruiter_message: str, context: str, resum
 @ai_group.command("interview-prep")
 @click.argument("jd_text")
 @click.option("--resume", "resume_name", default=None, help="参考简历名称（可选，根据简历真实经历定制问题）")
-@click.option("--count", default=10, type=click.IntRange(min=1), help="题量，默认 10")
+@click.option("--count", default=10, type=int, help="题量，默认 10")
 @click.pass_context
 def ai_interview_prep_cmd(ctx: click.Context, jd_text: str, resume_name: str | None, count: int) -> None:
 	"""基于目标职位生成模拟面试题
@@ -638,10 +520,13 @@ def ai_interview_prep_cmd(ctx: click.Context, jd_text: str, resume_name: str | N
 	if svc is None:
 		return
 
-	resolved = _read_text_argument(ctx, jd_text)
-	if resolved is None:
-		return
-	jd_text = resolved
+	if jd_text.startswith("@"):
+		file_path = Path(jd_text[1:])
+		if not file_path.exists():
+			handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+			ctx.exit(1)
+			return
+		jd_text = file_path.read_text(encoding="utf-8")
 
 	resume_text = "（未指定）"
 	if resume_name:
@@ -663,9 +548,8 @@ def ai_interview_prep_cmd(ctx: click.Context, jd_text: str, resume_name: str | N
 		ctx, "ai-interview-prep", result,
 		render=lambda d: render_ai_result(d, title="ai-interview-prep"),
 		hints={"next_actions": [
-			_hint_command(ctx, "ai chat-coach <chat_text>"),
-		], "operator_actions": [
 			"对照 questions 逐题准备答案",
+			"boss ai chat-coach <chat_text> 用于沟通准备",
 		]},
 	)
 
@@ -684,10 +568,13 @@ def ai_chat_coach_cmd(ctx: click.Context, chat_text: str, resume_name: str | Non
 	if svc is None:
 		return
 
-	resolved = _read_text_argument(ctx, chat_text)
-	if resolved is None:
-		return
-	chat_text = resolved
+	if chat_text.startswith("@"):
+		file_path = Path(chat_text[1:])
+		if not file_path.exists():
+			handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+			ctx.exit(1)
+			return
+		chat_text = file_path.read_text(encoding="utf-8")
 
 	resume_text = "（未指定）"
 	if resume_name:
@@ -708,7 +595,7 @@ def ai_chat_coach_cmd(ctx: click.Context, chat_text: str, resume_name: str | Non
 	handle_output(
 		ctx, "ai-chat-coach", result,
 		render=lambda d: render_ai_result(d, title="ai-chat-coach"),
-		hints={"operator_actions": [
+		hints={"next_actions": [
 			"按 next_action_recommendation 的建议行动",
 			"message_templates 可直接复制发送",
 		]},
@@ -733,7 +620,7 @@ def ai_suggest_keywords_cmd(ctx: click.Context, limit: int) -> None:
 			"ai-suggest-keywords",
 			{"keyword_groups": [], "patterns": [], "search_suggestions": []},
 			render=lambda d: render_ai_result(d, title="ai-suggest-keywords"),
-			hints={"next_actions": [_hint_command(ctx, "shortlist add <security_id> <job_id>")]},
+			hints={"next_actions": ["boss shortlist add <security_id> <job_id>"]},
 		)
 		return
 
@@ -762,8 +649,8 @@ def ai_suggest_keywords_cmd(ctx: click.Context, limit: int) -> None:
 		result,
 		render=lambda d: render_ai_result(d, title="ai-suggest-keywords"),
 		hints={"next_actions": [
-			_hint_command(ctx, "search <推荐关键词>"),
-			_hint_command(ctx, "preset add <name> <关键词>"),
+			"boss search <推荐关键词>",
+			"boss preset add <name> --query <关键词>",
 		]},
 	)
 
@@ -780,15 +667,7 @@ def ai_resume_optimize_cmd(ctx: click.Context, resume_name: str, jd_text: str | 
 		return
 
 	if not jd_text and not job_id:
-		search_cmd = _hint_command(ctx, "search <关键词>")
-		handle_error_output(
-			ctx,
-			"ai",
-			code="INVALID_PARAM",
-			message="需要指定 --jd 或 --job-id",
-			recovery_action=f"补上 --jd <职位描述> 或 --job-id <编号> 后重试；编号可从 {search_cmd} 的结果中取到",
-			hints={"next_actions": [search_cmd]},
-		)
+		handle_error_output(ctx, "ai", code="INVALID_PARAM", message="需要指定 --jd 或 --job-id")
 		ctx.exit(1)
 		return
 
@@ -802,17 +681,19 @@ def ai_resume_optimize_cmd(ctx: click.Context, resume_name: str, jd_text: str | 
 				code="CACHE_MISS",
 				message=f"job_id '{job_id}' 的职位描述未缓存",
 				recoverable=True,
-				recovery_action=_hint_command(ctx, f"detail <security_id> --job-id {shell_argument(job_id)}"),
+				recovery_action=f"boss detail <security_id> --job-id {job_id}",
 			)
 			ctx.exit(1)
 			return
 
 	# 支持 @file 语法
-	if jd_text:
-		resolved = _read_text_argument(ctx, jd_text)
-		if resolved is None:
+	if jd_text and jd_text.startswith("@"):
+		file_path = Path(jd_text[1:])
+		if not file_path.exists():
+			handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+			ctx.exit(1)
 			return
-		jd_text = resolved
+		jd_text = file_path.read_text(encoding="utf-8")
 
 	resume_text = _load_resume_text(ctx, resume_name)
 	if resume_text is None:
@@ -827,8 +708,8 @@ def ai_resume_optimize_cmd(ctx: click.Context, resume_name: str, jd_text: str | 
 		ctx, "ai-resume-optimize", result,
 		render=lambda d: render_ai_result(d, title="ai-resume-optimize"),
 		hints={"next_actions": [
-			_hint_command(ctx, f"resume edit {shell_argument(resume_name)}"),
-			_hint_command(ctx, f"ai optimize {shell_argument(resume_name)} --jd <jd_text>"),
+			f"boss resume edit {resume_name}",
+			f"boss ai optimize {resume_name} --jd <jd_text>",
 		]},
 	)
 
@@ -851,15 +732,7 @@ def ai_cover_letter_cmd(
 		return
 
 	if not jd_text and not job_id:
-		search_cmd = _hint_command(ctx, "search <关键词>")
-		handle_error_output(
-			ctx,
-			"ai",
-			code="INVALID_PARAM",
-			message="需要指定 --jd 或 --job-id",
-			recovery_action=f"补上 --jd <职位描述> 或 --job-id <编号> 后重试；编号可从 {search_cmd} 的结果中取到",
-			hints={"next_actions": [search_cmd]},
-		)
+		handle_error_output(ctx, "ai", code="INVALID_PARAM", message="需要指定 --jd 或 --job-id")
 		ctx.exit(1)
 		return
 
@@ -873,17 +746,19 @@ def ai_cover_letter_cmd(
 				code="CACHE_MISS",
 				message=f"job_id '{job_id}' 的职位描述未缓存",
 				recoverable=True,
-				recovery_action=_hint_command(ctx, f"detail <security_id> --job-id {shell_argument(job_id)}"),
+				recovery_action=f"boss detail <security_id> --job-id {job_id}",
 			)
 			ctx.exit(1)
 			return
 
 	# 支持 @file 语法
-	if jd_text:
-		resolved = _read_text_argument(ctx, jd_text)
-		if resolved is None:
+	if jd_text and jd_text.startswith("@"):
+		file_path = Path(jd_text[1:])
+		if not file_path.exists():
+			handle_error_output(ctx, "ai", code="INVALID_PARAM", message=f"文件 '{file_path}' 不存在")
+			ctx.exit(1)
 			return
-		jd_text = resolved
+		jd_text = file_path.read_text(encoding="utf-8")
 
 	resume_text = _load_resume_text(ctx, resume_name)
 	if resume_text is None:
@@ -904,7 +779,7 @@ def ai_cover_letter_cmd(
 		hints={
 			"note": "仅为 AI 生成的草稿，请自行核对真实性后再使用；本命令不发送任何消息",
 			"next_actions": [
-				_hint_command(ctx, f"ai interview-prep <jd_text> --resume {shell_argument(resume_name)}"),
+				f"boss ai interview-prep --jd <jd_text> --resume {resume_name}",
 			],
 		},
 	)

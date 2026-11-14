@@ -56,9 +56,7 @@ def process_pending(
 		# Commit each confirmed queue effect before attempting another item. A
 		# later risk/error must not leave a successful action pending for replay.
 		store.write_pending(actions)
-		# 预览不是执行：dry-run 期间写 prior 会让下一次真实运行误以为动作已发生
-		# （Issue #889），因此只有真正执行成功才更新业务状态。
-		if state is not None and status is EventStatus.AUTO_EXECUTED:
+		if state is not None and status in {EventStatus.AUTO_EXECUTED, EventStatus.DRY_RUN}:
 			prior = state.setdefault("conversations", {}).setdefault(item.candidate_key, {})
 			update_prior(prior, decision)
 		guard.checkpoint()
@@ -98,18 +96,13 @@ def process_ref(
 	}:
 		safety = guard.before_action(decision)
 		if safety.allowed:
-			# 预览不落盘线索记录（Issue #889）：dry-run 后重复运行不能看见
-			# 一份从未真实产生过的面试线索清单。
-			if status is EventStatus.AUTO_EXECUTED:
-				store.append_interview_lead(candidate_key, decision.interview_time, decision.reason)
+			store.append_interview_lead(candidate_key, decision.interview_time, decision.reason)
 		else:
 			status = EventStatus.CIRCUIT_BREAKER_OPEN if safety.circuit_breaker else EventStatus.STOPPED_BY_SAFETY
 			event_reason = safety.reason
 	elif status is EventStatus.AUTO_EXECUTED or status is EventStatus.DRY_RUN:
 		status, event_reason = execute_or_dry_run(adapter, guard, decision, ref, dry_run)
-		# 只有真正执行成功才把动作记进对话阶段；dry-run 写 prior 会让下一次
-		# 真实运行误判「问卷已发」并跳过它（Issue #889）。
-		if status is EventStatus.AUTO_EXECUTED:
+		if status in {EventStatus.AUTO_EXECUTED, EventStatus.DRY_RUN}:
 			update_prior(prior, decision)
 	guard.checkpoint()
 	event = make_event(
@@ -157,12 +150,6 @@ def execute_or_dry_run(
 	if dry_run:
 		return EventStatus.DRY_RUN, decision.reason
 	result = adapter.execute_action(decision.action, decision.message, ref)
-	if result.status == "unconfirmed":
-		# 结果可能已生效：不重试、不继续处理其他候选人，
-		# 先停下来让操作者在官方页面核对后再显式 --resume。
-		reason = str(result.details.get("reason") or "ACTION_UNCONFIRMED")
-		guard.open_circuit_breaker(f"platform verification required: {reason}")
-		return EventStatus.PLATFORM_VERIFICATION_REQUIRED, reason
 	if result.status != "executed":
 		reason = str(result.details.get("reason", result.status))
 		guard.record_failure(reason)
@@ -230,16 +217,11 @@ def _next_pending_status(status: EventStatus) -> str:
 		case EventStatus.AUTO_EXECUTED:
 			return "executed"
 		case EventStatus.DRY_RUN:
-			# 预览没有发出任何东西：队列项必须留在 pending，下一次真实运行才会执行
-			# （Issue #889）。旧实现把它改成 "dry-run"，演练一次就永久消耗掉
-			# 操作者批准过的待执行动作。
-			return "pending"
-		case EventStatus.PLATFORM_VERIFICATION_REQUIRED:
-			# 动作可能已经生效：退出 pending 队列，避免下一轮自动重发。
-			return "verification-required"
+			return "dry-run"
 		case (
 			EventStatus.STOPPED_BY_SAFETY
 			| EventStatus.CIRCUIT_BREAKER_OPEN
+			| EventStatus.PLATFORM_VERIFICATION_REQUIRED
 			| EventStatus.SKIPPED
 			| EventStatus.QUEUED_FOR_REVIEW
 			| EventStatus.QUEUED_PENDING_ACTION

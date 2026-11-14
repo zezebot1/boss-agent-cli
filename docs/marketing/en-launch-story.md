@@ -24,7 +24,8 @@ Recommended: **A**. It frames the project as an agent integration without implyi
 
 ```bash
 uv tool install boss-agent-cli
-boss doctor                     # prints a runnable browser-kernel install command when missing
+patchright install chromium
+boss doctor
 boss login
 boss search "golang" --city Shanghai --welfare "two-day weekends,5 insurances 1 fund"
 boss detail <security_id> --job-id <job_id>
@@ -70,7 +71,7 @@ After connecting MCP, an agent can run a low-risk chain such as search -> detail
 
 - `boss schema` currently exposes 38 top-level commands; `hr` has 9 first-level recruiter subcommands; MCP exposes 50 default low-risk tools
 - `zhipin` (BOSS Zhipin) is the only registered platform and covers the main candidate workflow
-- CI covers Python 3.11 / 3.12 / 3.13 / 3.14, ruff, mypy, docs consistency, and CodeQL
+- CI covers Python 3.10 / 3.11 / 3.12 / 3.13, ruff, mypy, docs consistency, and CodeQL
 - No telemetry, analytics, or cloud sync; adoption is measured through PyPI downloads and GitHub Insights only
 
 ### Links

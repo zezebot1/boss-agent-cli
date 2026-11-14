@@ -12,9 +12,8 @@ uv tool install boss-agent-cli   # uv（秒级，自动隔离）
 pipx install boss-agent-cli      # pipx（隔离环境）
 pip install boss-agent-cli       # pip
 
-# 安装浏览器内核（用于登录）：uv tool / pipx 环境里 patchright 不在 PATH，
-# 缺内核时 boss doctor 会给出可直接执行的安装命令
-boss doctor
+# 安装浏览器（用于登录）
+patchright install chromium
 
 # 环境自检 + 登录
 boss doctor
@@ -39,9 +38,10 @@ boss search "Golang" --city 广州 --welfare "双休,五险一金"
 # 复杂筛选可复用用户在网页上选好的 URL
 boss search --url 'https://www.zhipin.com/web/geek/jobs?query=Golang&city=101280100&experience=104,105'
 
-# Step 3: 查看详情并整理本地候选池
+# Step 3: 查看详情并推进后续动作
 boss detail <security_id>
 boss shortlist add <security_id> <job_id>
+boss apply <security_id> <job_id>
 ```
 
 也可一次提交共享 workflow，并用返回的 `run_id` 查询或恢复：
@@ -56,17 +56,10 @@ boss --json wizard --resume <run_id>
 - `stdout` 只读 JSON 信封
 - `ok=true` 代表成功，`ok=false` 时读取 `error.code` 与 `error.recovery_action`
 - `boss schema` 除了返回 `supported_platforms` / `supported_recruiter_platforms`，还会给每个命令附带 `availability`，可直接按 `role/platform` 做工具路由
-- `boss show <#>` 的编号绑定最近一次 `search` / `recommend` 的快照，`data.index_snapshot` 给出 `source` / `page` / `count` / `saved_at`；`search` / `recommend` 的 `pagination.index_snapshot` 返回同一份快照身份，可直接与 `show` 的字段比对。重跑搜索或翻页后旧编号会指向新结果，必须重新定位
-
-### Agent 授权边界
-
-默认只做搜岗、读取详情、管理本地候选池、导出本地报告和基于已确认事实的草稿。不得因用户泛泛表示“想找工作”就调用 `boss apply`、`boss greet`、`boss batch-greet` 或任何平台写操作。
-
-只有用户在当前对话点名具体岗位，并在点击前再次确认时，才可执行一次沟通或投递。每次外部动作后必须读取平台明确结果，再询问是否继续下一个；不得建立外发队列、无人值守批量操作、复用同一话术或重试结果不明的写操作。遇到 `ACCOUNT_RISK`、`ENVIRONMENT_RISK`、验证码/安全页或限流时，保存 checkpoint 并停止，不得绕过平台控制。
 
 ### 候选人 crawl 编排
 
-安装 `pip install "boss-agent-cli[crawl]"`（或 `uv tool install "boss-agent-cli[crawl]"`；源码仓库内为 `uv sync --extra crawl`） 后，crawl 只使用 `<data-dir>/crawl/chrome-profile` 独立 profile。可用细粒度 CLI 创建任务，再使用 MCP 读取或本地导入已有任务；也可通过 `boss_wizard` 直接推进共享 crawl workflow：
+安装 `uv sync --extra crawl` 后，crawl 只使用 `<data-dir>/crawl/chrome-profile` 独立 profile。可用细粒度 CLI 创建任务，再使用 MCP 读取或本地导入已有任务；也可通过 `boss_wizard` 直接推进共享 crawl workflow：
 
 ```text
 boss crawl start <query> --city <city> --pages <n>
@@ -84,8 +77,6 @@ boss agent crawl --query "AI 工程师" --city 杭州 --pages 3 --with-detail --
 ```
 
 默认不注入 Hook。只有拥有相应授权时，才可在 CLI 显式传 `--hook-profile screenshot-full --hook-dir <含 SHA256SUMS 的目录>`；项目不随包发布第三方脚本。需要立即终止时执行 `boss crawl stop <run_id>`。当 `crawl_status` 返回 `risk_stopped` 时，同 `data_dir` 的风险锁会在浏览器构造前阻断所有新采集和恢复；保留 `run_id`，由用户确认官方目标业务页恢复后执行 `boss clean --risk-lock`，再显式 `boss crawl resume <run_id>`。恢复步骤属于 `operator_actions`，Agent 不自行清锁。`budget_stopped` 需处理预算后恢复；两者均不应重新建任务或循环重试。本地状态、结果和导入仍可用。
-
-同一 `run_id` 同时只允许一个执行器：另一次 `crawl start` / `crawl resume` / wizard 采集步骤还在执行时，后到者返回 `CRAWL_BUSY`，不发出请求、不推进断点，也不清除停止请求。按 `hints.next_actions` 查 `boss crawl status <run_id>`，等当前执行结束后再恢复；不要并发恢复同一个 `run_id`，也不要为了让位去 `--stop` 一次正常的执行。`status` / `results` / `stop` 不受影响，不同 `run_id` 互不阻塞；执行进程异常退出后执行权由操作系统自动释放，无须清理锁文件。
 
 ### 招聘者 workflow
 
@@ -129,17 +120,8 @@ boss status
 - `RATE_LIMITED`：已声明可重放的读取可有限冷却；写操作先核对是否生效
 - `REQUEST_BUDGET_EXHAUSTED`：共享执行锁、60 秒预算或冷却超出本次等待时限，本次操作未发出；保留 checkpoint，检查并发与 `retry_after_seconds` 后显式恢复，不自动重试或清锁。同 `data_dir` 默认共享，可用 `request_budget_dir` 显式分组；见 [共享预算配置](commands.md#共享请求预算与冷却)。写后确认中断仍为 `ACTION_UNCONFIRMED`，先核对结果
 - `NOT_SUPPORTED`：切换 schema catalog 中支持该 goal 的平台或 workflow
-- `BROWSER_KERNEL_MISSING`：patchright 所需 Chromium 修订版未安装（`search` / `detail` / `greet` / `chat` / `me` / `wizard` 等启动浏览器的命令，以及 `resume export --format pdf` 都会返回此码）。这是确定性失败，重试与 `--resume` 都不会成功；按 `recovery_action` 执行内核安装命令（信封给的是运行 boss 的解释器 + `-m patchright install chromium`，在 `uv tool install` 环境里也能直接执行），再用 `hints.next_actions` 里本次数据目录的 `boss doctor` 核对已安装版本
-- 结果未知的写操作：CLI 与 MCP 信封的 `error.details` 都带 `replay_safe`；为 `false`（或 `outcome_unknown=true`）时动作可能已生效，先核对平台实际状态，禁止自动重试。读取被中断时 `replay_safe=true`，可按通道规则重试。`ACTION_UNCONFIRMED`、`GREET_RESULT_UNKNOWN`、`LOCATION_RESULT_UNKNOWN`、`RESUME_ACCEPT_RESULT_UNKNOWN` 由错误码登记表统一补 `replay_safe: false` 与 `outcome_unknown: true`；`LOCAL_STATE_WRITE_FAILED` 的平台结果已确认，只补 `replay_safe: false`；`UNKNOWN` 表示平台响应无法识别，同样禁止自动重试（浏览器通道对写请求拿到非 JSON 响应时直接归为 `ACTION_UNCONFIRMED`）。即使命令只带回 `sent: null` / `accepted: null` 也以这两个字段为准
-- `ACTION_UNCONFIRMED`：先核对已发出的写操作；求职者用 `boss chat` 查招呼、`boss me --section deliver` 查投递，招聘者用 `boss hr chatmsg <friend_id>` 查会话。直接使用信封的 `hints.next_actions` 可保留本次数据目录；禁止自动重发。wizard 的写步骤在请求发出前就把这条记录落在步骤上：执行进程在结果确认前被终止，`--resume` 不会重放该步骤，而是返回同一错误码与 `recovery_action` 里的核对命令（该失败走 `error` 信封、不带 `hints`）
-- `UNKNOWN`：平台返回了未识别的错误。写操作的响应无法证明动作没有发生，按上面「结果未知的写操作」处理；不要因为它不是 `ACTION_UNCONFIRMED` 就当成网络抖动重试。`batch-greet` 与 `boss wizard` 也会就地停批，不会自动重发
 - `WORKFLOW_TIMEOUT`：正常 wizard 超时保留 `run_id`，调整超时后显式 `boss wizard --resume <run_id>`；若 MCP 返回 `outcome_unknown=true`，先核对未确认的动作，禁止直接重试
-- `WORKFLOW_BUSY`：同一 `run_id` 同时只允许一次执行；另一次调用（另一个终端、Agent 或 MCP 调用）还在执行时，本次调用不执行任何步骤、不改动 checkpoint。按 `hints.next_actions` 用 `boss wizard --status <run_id>` 查看进度，等它结束后再恢复；不要并发恢复同一个 `run_id`，也不要为了让位去 `--stop` 一次正常的执行。`--status` 与 `--stop` 不受影响，不同 `run_id` 互不阻塞；执行进程异常退出后执行权自动归还，无须清理
-- `CRAWL_BUSY`：同一 crawl `run_id` 同时只允许一次执行；另一次 `crawl start` / `crawl resume` / wizard 采集步骤还在执行时，本次调用不发出请求、不推进断点、也不清除停止请求。按 `hints.next_actions` 用 `boss crawl status <run_id>` 查看进度，等它结束后再恢复；不要并发恢复同一个 `run_id`，也不要为了让位去 `--stop` 一次正常的执行。`status` / `results` / `stop` 不受影响，不同 `run_id` 互不阻塞；执行进程异常退出后执行权由操作系统自动释放，无须清理锁文件
-- `CRAWL_UNAVAILABLE`：采集运行环境不可用，最常见的是默认安装没有带 `crawl` 可选依赖。入口在创建任务、启动后台进程之前就返回它，重试或恢复不会改变结果；按 `error.recovery_action` 安装 `boss-agent-cli[crawl]` 后重新执行原命令。
-- `INVALID_PARAM`：校正参数（城市、福利、页码等）；MCP 侧还包括未知工具名、不符合 `inputSchema` 声明类型的参数（例如把 `dry_run` 传成字符串 `"true"`），以及 `inputSchema.properties` 之外的未知参数（工具的 schema 已声明顶层 `additionalProperties: false`）。枚举参数（`format` / `sort` / `from_who` / `section` / `detail_status` / `tone` / `lang` / `type`）传显式空串会原样到达 CLI，得到带可选值列表的取值诊断，不会静默落回默认值；传 `null` 或不传仍等价于省略。`boss_wizard.action` 的非法值（如 `resum`、`STOP`、空串）同样在进入 CLI 前被拒绝并列出 `run / resume / status / stop`，不会静默新建一次 workflow run；只有缺省或 `null` 才落回默认的 `run`
-
-缺少或写错子命令时，`hints.next_actions` 会列出各子命令的帮助命令（例如 `boss resume init --help`）。先读取帮助，再按目标与必填参数执行具体动作。
+- `INVALID_PARAM`：校正参数（城市、福利、页码等）
 
 ## 4) 工具协议直出
 
@@ -153,7 +135,7 @@ boss schema --format anthropic-tools  # Claude Tool Use API
 boss schema --format mcp-tools        # Model Context Protocol Tools
 ```
 
-三个工具格式均来自运行时共享的 79 个 MCP 工具目录，名称与输入参数保持一致；原生格式继续按 39 个顶层命令描述 CLI。
+三个工具格式均来自运行时共享的 78 个 MCP 工具目录，名称与输入参数保持一致；原生格式继续按 39 个顶层命令描述 CLI。
 
 输出可直接喂给对应 host，无需手写适配。
 

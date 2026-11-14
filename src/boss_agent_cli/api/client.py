@@ -144,21 +144,17 @@ class BossClient(_BaseHttpClient):
 		return result
 
 	def _read_request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
-		"""只读请求：来源要求走浏览器时走浏览器，否则保留 httpx 的认证与重试语义。
+		"""显式非 auto 来源才走浏览器；默认保留 httpx 的认证与重试语义。
 
 		缺少本地凭据仍返回 AUTH_REQUIRED，浏览器请求不继承 httpx 的
-		stoken 刷新或限流重试循环。``httpx-only`` 的 ``is_browser_only()`` 恒为
-		False，因此它永远走 httpx。
+		stoken 刷新或限流重试循环。
 		"""
-		if self.is_browser_only():
-			return self._browser_request(method, url, browser_source=self._browser_source, **kwargs)
-		return self._request(method, url, **kwargs)
+		from boss_agent_cli.api.browser_source import resolve_policy
 
-	def _form_request(self, method: str, url: str, data: dict[str, Any]) -> dict[str, Any]:
-		"""表单体请求：默认走浏览器通道，``httpx-only`` 时改走 httpx。"""
-		if self.browser_enabled():
-			return self._browser_request(method, url, data=data)
-		return self._request(method, url, data=data)
+		configured = resolve_policy(self._browser_source)
+		if configured.name != "auto":
+			return self._browser_request(method, url, browser_source=configured.name, **kwargs)
+		return self._request(method, url, **kwargs)
 
 	# ── Public API ───────────────────────────────────────────────────
 	# High-risk: search, recommend, greet, job_card → browser channel
@@ -167,70 +163,47 @@ class BossClient(_BaseHttpClient):
 	# 见 _BaseHttpClient._request。
 
 	def search_jobs(self, query: str, **filters: Any) -> dict[str, Any]:
-		# 真机是 POST + application/x-www-form-urlencoded，字段集合与顺序按 2026-10-29
-		# 抓包对齐（docs/research/zhipin-request-identity-2026-10-29.md）。缺省项留空串，
-		# 不用省略——页面自己也是把这些字段全部发出去的。
-		data: dict[str, Any] = {
-			"page": filters.get("page", 1),
-			"pageSize": filters.get("page_size", 15),
-			"city": "",
-			"query": query,
-			"expectInfo": "",
-			"multiSubway": "",
-			"multiBusinessDistrict": "",
-			"position": "",
-			"jobType": "",
-			"salary": "",
-			"experience": "",
-			"degree": "",
-			"industry": "",
-			"scale": "",
-			"stage": "",
-			"scene": 1,
-			"encryptExpectId": "",
-		}
+		params: dict[str, Any] = {"query": query, "page": filters.get("page", 1)}
 		if raw_params := filters.get("raw_params"):
-			data.update(raw_params)
+			params.update(raw_params)
 		if city := filters.get("city"):
 			code = endpoints.CITY_CODES.get(city)
 			if code is None:
 				raise ValueError(f"未知城市: {city}")
-			data["city"] = code
+			params["city"] = code
 		if salary := filters.get("salary"):
 			code = filters.get("salary_code") or endpoints.SALARY_CODES.get(salary)
 			if code:
-				data["salary"] = code
+				params["salary"] = code
 		if exp := filters.get("experience"):
 			code = filters.get("experience_code") or endpoints.EXPERIENCE_CODES.get(exp)
 			if code:
-				data["experience"] = code
+				params["experience"] = code
 		if edu := filters.get("education"):
 			code = filters.get("education_code") or endpoints.EDUCATION_CODES.get(edu)
 			if code:
-				data["degree"] = code
+				params["degree"] = code
 		if scale := filters.get("scale"):
 			code = filters.get("scale_code") or endpoints.SCALE_CODES.get(scale)
 			if code:
-				data["scale"] = code
+				params["scale"] = code
 		if industry := filters.get("industry"):
 			code = filters.get("industry_code") or endpoints.INDUSTRY_CODES.get(industry)
 			if code:
-				data["industry"] = code
+				params["industry"] = code
 		if stage := filters.get("stage"):
 			code = filters.get("stage_code") or endpoints.STAGE_CODES.get(stage)
 			if code:
-				data["stage"] = code
+				params["stage"] = code
 		if job_type := filters.get("job_type"):
 			code = filters.get("job_type_code") or endpoints.JOB_TYPE_CODES.get(job_type)
 			if code:
-				data["jobType"] = code
-		return self._form_request("POST", endpoints.SEARCH_URL, data)
+				params["jobType"] = code
+		return self._browser_request("GET", endpoints.SEARCH_URL, params=params)
 
 	def recommend_jobs(self, page: int = 1) -> dict[str, Any]:
 		params = {"page": page}
-		if self.browser_enabled():
-			return self._browser_request("GET", endpoints.RECOMMEND_URL, params=params)
-		return self._request("GET", endpoints.RECOMMEND_URL, params=params)
+		return self._browser_request("GET", endpoints.RECOMMEND_URL, params=params)
 
 	def greet(self, security_id: str, job_id: str, message: str = "") -> dict[str, Any]:
 		data = {
@@ -249,6 +222,46 @@ class BossClient(_BaseHttpClient):
 		if lid:
 			data["lid"] = lid
 		return self._browser_request("POST", endpoints.GREET_URL, data=data)
+
+	def reply(self, friend_id: str, message: str) -> dict[str, Any]:
+		"""Send a follow-up message through the user's candidate chat page.
+
+		BOSS's candidate chat editor sends through the page's Vue component rather
+		than the retired HTTP reply endpoint. The page must be open in CDP Chrome.
+		"""
+		self._check_cdp_risk_lock()
+		browser = self._get_browser()
+		script = r"""
+		async ({friendId, content}) => {
+			const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+			const root = document.querySelector('.chat-user')?.__vue__;
+			if (!root) return {ok: false, error: 'candidate chat list is not open'};
+			const list = root.fullList || root.list || [];
+			const target = list.find(item => String(item.friendId ?? item.uid) === String(friendId));
+			if (!target) return {ok: false, error: 'target conversation is not loaded in the candidate chat page'};
+			try {
+				const switched = root.handleClickItem(target);
+				if (switched && typeof switched.then === 'function') await switched;
+			} catch (e) {
+				return {ok: false, error: 'switch conversation failed: ' + e.message};
+			}
+			await sleep(800);
+			const input = document.querySelector('.chat-input');
+			const editor = input?.parentElement?.__vue__;
+			if (!input || !editor || typeof editor.sendText !== 'function') {
+				return {ok: false, error: 'candidate chat editor is unavailable'};
+			}
+			input.innerHTML = content.replace(/[&<>\"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[ch]));
+			input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: content}));
+			await sleep(500);
+			if (!editor.enableSubmit) return {ok: false, error: 'candidate chat editor did not enable send'};
+			try { editor.sendText(); } catch (e) { return {ok: false, error: 'sendText failed: ' + e.message}; }
+			await sleep(1200);
+			const refreshed = (root.fullList || root.list || []).find(item => String(item.friendId ?? item.uid) === String(friendId));
+			return {ok: true, friendId: String(friendId), lastText: refreshed?.lastText || '', targetName: target.name || ''};
+		}
+		"""
+		return browser.evaluate_js(script, {"friendId": str(friend_id), "content": message})
 
 	def job_card(self, security_id: str, lid: str = "") -> dict[str, Any]:
 		"""httpx 优先 + 浏览器降级获取职位卡片信息；CDP 模式下只走浏览器。"""

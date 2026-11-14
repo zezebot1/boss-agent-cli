@@ -283,8 +283,7 @@ def test_online_resume_script_reads_official_dialog_fields(tmp_path):
 
 	script = tmp_path / "resume-page.js"
 	script.write_text(_PAGE_RESUME_HARNESS.replace("__SCRIPT__", _ONLINE_RESUME_JS), encoding="utf-8")
-	# 与其它 Node 回归同一预算：CI 冷启动卡顿可超过 10s（Issue #1029）。
-	completed = subprocess.run(["node", str(script)], capture_output=True, text=True, check=True, timeout=30)
+	completed = subprocess.run(["node", str(script)], capture_output=True, text=True, check=True, timeout=10)
 	result = json.loads(completed.stdout)
 	assert result["ok"] is True
 	info = result["geekDetailInfo"]
@@ -586,62 +585,10 @@ def test_send_message_by_friend_without_real_ws_send_returns_error():
 
 		result = client.send_message_by_friend(1, "x")
 		assert result["code"] == -1
-		assert "页面动作未在目标聊天记录中得到确认" in result["message"]
+		assert "does not confirm acceptance in target chat history" in result["message"]
 		assert result["zpData"]["ws_evidence"]["matched_ws_count"] == 0
 		assert "sample_bits" not in result["zpData"]["ws_evidence"]
-		# 失败 details 要说明历史回读确实跑过、命中了多少：只给 ws_evidence
-		# 时无法区分「没回读」和「回读了但没命中」。
-		assert result["zpData"]["history_checked"] is True
-		assert result["zpData"]["history_matched_count"] == 0
-		assert result["zpData"]["history_attempts"] == 4
-		assert result["zpData"]["history_new_count"] == 0
-		assert result["zpData"]["history_self_count"] == 0
-		assert result["zpData"]["history_recipient_count"] == 0
 		assert private_message not in json.dumps(result, ensure_ascii=False)
-	client.close()
-
-
-def test_chat_ws_evidence_counts_frames_without_readable_text():
-	"""有发送帧但提取不到文本时，诊断要能和「没有发送帧」区分开（#735）。"""
-	client = BossRecruiterClient(_make_auth())
-	events = [
-		{"kind": "ws_send", "bytes": 120, "utf8_bits": ["hello"]},
-		{"kind": "ws_send", "bytes": 300},
-		{"kind": "ws_recv", "bytes": 40, "utf8_bits": ["hello"]},
-	]
-	evidence = client._chat_ws_evidence(events, ["hello"])
-	assert evidence == {
-		"event_count": 3,
-		"ws_send_count": 2,
-		"ws_send_without_text": 1,
-		"matched_ws_count": 1,
-	}
-	client.close()
-
-
-def test_exchange_history_evidence_reports_funnel_counts():
-	"""回读诊断要能指出卡在「新消息 / 自己发出 / 收件人」哪一步（#735）。"""
-	client = BossRecruiterClient(_make_auth())
-	client.chat_history = MagicMock(
-		return_value={
-			"code": 0,
-			"zpData": {
-				"messages": [
-					{"mid": 1, "time": 1000, "from": {"uid": 999}, "body": {"text": "hello"}},
-					{"mid": 2, "time": 2000, "body": {"text": "hello"}},
-				]
-			},
-		}
-	)
-
-	evidence = client._exchange_history_evidence(
-		7, ("hello",), exchange_type=0, baseline_mids=None, since_ms=0
-	)
-
-	assert evidence["new_count"] == 2
-	assert evidence["self_count"] == 1
-	assert evidence["recipient_count"] == 1
-	assert evidence["matched_count"] == 1
 	client.close()
 
 

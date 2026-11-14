@@ -138,67 +138,9 @@ def test_forbidden_archive_members(verifier, tmp_path, name):
 		verifier.check_artifacts(tmp_path, VERSION)
 
 
-def test_tracked_files_reads_the_real_repository(verifier):
-	"""守卫必须真的读 git：`PYTHONUTF8` 之外不改环境，路径与当前仓库一致。"""
-	tracked = verifier.tracked_files(ROOT, timeout=30)
-	assert "pyproject.toml" in tracked
-	assert "scripts/verify_release.py" in tracked
-	assert not any(name.startswith("src/") for name in tracked if name.endswith(".pyc"))
-
-
-def test_tracked_file_matching_ignores_wheel_dist_info_and_directories(verifier):
-	names = [
-		f"boss_agent_cli-{VERSION}/",
-		f"boss_agent_cli-{VERSION}.dist-info/METADATA",
-		f"boss_agent_cli-{VERSION}/PKG-INFO",
-		"boss_agent_cli/__init__.py",
-	]
-	verifier.check_tracked_members(names, {"src/boss_agent_cli/__init__.py"}, version=VERSION)
-
-
 def test_regular_bridge_word_is_not_a_removed_component(verifier):
 	verifier.check_member("tests/test_removed_bridge.py", VERSION, sdist=False)
 	verifier.check_member(f"boss_agent_cli-{VERSION}/docs/bridge-history.md", VERSION, sdist=True)
-
-
-def test_artifacts_reject_members_that_git_does_not_track(verifier, tmp_path):
-	"""构建后端只读 `.gitignore`，`.git/info/exclude` 里的本地文件会被静默打进源码包。
-
-	v3.3.0 准备时本地源码包因此从 6.5 MB 涨到 78 MB（混入演示素材、研究草稿与
-	本地测试），而 `--require-clean` 的 git status 看不到被忽略的文件。
-	"""
-	tracked = {"src/boss_agent_cli/__init__.py", "README.md"}
-	verifier.check_tracked_members(
-		[f"boss_agent_cli-{VERSION}/PKG-INFO", f"boss_agent_cli-{VERSION}/README.md"],
-		tracked,
-		version=VERSION,
-	)
-	verifier.check_tracked_members(["boss_agent_cli/__init__.py"], tracked, version=VERSION)
-	with pytest.raises(verifier.VerificationError, match="未被 git 跟踪"):
-		verifier.check_tracked_members(
-			[f"boss_agent_cli-{VERSION}/docs/research/draft.md"], tracked, version=VERSION
-		)
-	with pytest.raises(verifier.VerificationError, match="未被 git 跟踪"):
-		verifier.check_tracked_members(["boss_agent_cli/private_module.py"], tracked, version=VERSION)
-
-
-def test_artifact_check_reads_the_tracked_file_list(verifier, tmp_path, monkeypatch):
-	"""`root` 给出时必须真的去问 git，而不是只做形状检查。"""
-	make_artifacts(tmp_path, member="boss_agent_cli/private_module.py")
-	calls = []
-
-	def fake_tracked_files(root, *, timeout):
-		calls.append((root, timeout))
-		return set()
-
-	monkeypatch.setattr(verifier, "tracked_files", fake_tracked_files)
-	with pytest.raises(verifier.VerificationError, match="未被 git 跟踪"):
-		verifier.check_artifacts(tmp_path, VERSION, root=tmp_path, timeout=3)
-	assert calls == [(tmp_path, 3)]
-	monkeypatch.setattr(
-		verifier, "tracked_files", lambda root, *, timeout: {"PKG-INFO", "src/boss_agent_cli/private_module.py"}
-	)
-	assert verifier.check_artifacts(tmp_path, VERSION, root=tmp_path, timeout=3)["files"]
 
 
 def test_archive_links_and_wrong_sdist_root_are_rejected(verifier):
@@ -257,7 +199,6 @@ def test_offline_report_never_installs(verifier, monkeypatch, tmp_path):
 	source_tree(tmp_path)
 	make_artifacts(tmp_path / "dist")
 	monkeypatch.setattr(verifier, "check_git", lambda *a, **kw: {"clean": False, "commit": "abc"})
-	monkeypatch.setattr(verifier, "tracked_files", lambda root, *, timeout: {"PKG-INFO"})
 	monkeypatch.setattr(verifier, "run_command", lambda *a, **kw: pytest.fail("默认检查不运行安装器"))
 	report = verifier.verify(options(tmp_path / "dist"), tmp_path)
 	assert report["ok"]
@@ -271,7 +212,6 @@ def test_fresh_install_reports_failures_and_cleans(verifier, monkeypatch, tmp_pa
 	source_tree(tmp_path)
 	make_artifacts(tmp_path / "dist")
 	monkeypatch.setattr(verifier, "check_git", lambda *a, **kw: {"clean": True})
-	monkeypatch.setattr(verifier, "tracked_files", lambda root, *, timeout: {"PKG-INFO"})
 	monkeypatch.setattr(verifier.shutil, "which", lambda name: None if failure == "uv_missing" else "/fake/uv")
 	calls = []
 
@@ -299,32 +239,20 @@ def test_fresh_install_reports_failures_and_cleans(verifier, monkeypatch, tmp_pa
 		assert "PYTHONPATH" not in kwargs["env"]
 	if failure is None:
 		assert calls[1][0][-1].endswith(".whl[mcp]")
-		assert "--refresh-package" not in calls[1][0]
 
 
-@pytest.mark.parametrize("install_fails", [False, True])
-def test_pypi_uses_exact_version_and_refreshes_only_target(verifier, monkeypatch, tmp_path, install_fails):
+def test_pypi_uses_exact_version(verifier, monkeypatch, tmp_path):
 	monkeypatch.setattr(verifier, "check_git", lambda *a, **kw: {"clean": True})
 	monkeypatch.setattr(verifier.shutil, "which", lambda _: "/fake/uv")
 	calls = []
 
 	def run(argv, **kw):
 		calls.append(argv)
-		if "pip" in argv and install_fails:
-			raise verifier.VerificationError("安装失败")
 		return json.dumps(probe_report()) if argv[0].endswith(("python", "python.exe")) else ""
 
 	monkeypatch.setattr(verifier, "run_command", run)
-	report = verifier.verify(options(pypi_version=VERSION), tmp_path)
-	assert report["ok"] is (not install_fails)
-	install = calls[1]
-	assert install[-1] == f"boss-agent-cli[mcp]=={VERSION}"
-	assert "--refresh-package" in install
-	assert install[install.index("--refresh-package") + 1] == "boss-agent-cli"
-	assert install.count("--refresh-package") == 1
-	assert "--refresh" not in install
-	assert "--no-cache" not in install
-	assert report["steps"][-1]["status"] == ("not_run" if install_fails else "passed")
+	assert verifier.verify(options(pypi_version=VERSION), tmp_path)["ok"]
+	assert calls[1][-1] == f"boss-agent-cli[mcp]=={VERSION}"
 
 
 def test_cli_failure_is_single_json(verifier, monkeypatch, tmp_path, capsys):

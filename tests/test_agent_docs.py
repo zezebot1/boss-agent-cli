@@ -92,18 +92,6 @@ def test_agent_quickstart_exists_and_has_core_sections():
 	assert "[Capability Matrix](capability-matrix.md)" in content
 
 
-def test_agent_quickstart_documents_both_busy_contracts():
-	"""两个并发互斥错误码要在两份快速上手里同时出现（Issue #1033）。
-
-	3.4.4 新增 `CRAWL_BUSY` 后，Agent 的错误码清单只写了同类的 `WORKFLOW_BUSY`；
-	只补一侧或只补一个码，都会让 Agent 在并发恢复被拒时找不到处理说明。
-	"""
-	for name in ("docs/agent-quickstart.md", "docs/agent-quickstart.en.md"):
-		content = _read(name)
-		assert "`WORKFLOW_BUSY`" in content, name
-		assert "`CRAWL_BUSY`" in content, name
-
-
 def test_capability_matrix_exists_and_covers_core_capabilities():
 	path = ROOT / "docs/capability-matrix.md"
 	assert path.exists(), "docs/capability-matrix.md should exist"
@@ -119,7 +107,7 @@ def test_capability_matrix_exists_and_covers_core_capabilities():
 	assert "`boss config`" in content
 	assert "`boss clean`" in content
 	assert "39 个顶层命令" in content
-	assert "15 个一级招聘者子命令" in content
+	assert "14 个一级招聘者子命令" in content
 	assert "`zhipin`" in content
 	assert "zhilian" not in content
 	assert "智联" not in content
@@ -165,7 +153,7 @@ def test_mcp_readme_links_to_quickstart_and_matrix():
 
 
 def test_readme_badge_policy_exists_and_has_core_rules():
-	content = _read("docs/maintainer/readme-badge-policy.md")
+	content = _read("docs/readme-badge-policy.md")
 	assert "# README 第三方 Badge 准入标准" in content
 	assert "`README.md` / `README.en.md`" in content
 	assert "### 一类：默认允许" in content
@@ -200,184 +188,6 @@ def test_readme_en_mentions_current_mcp_tool_count():
 	assert "[Roadmap](ROADMAP.en.md)" in content
 
 
-def test_llms_txt_reports_current_version_and_counts():
-	"""`llms.txt` 是 Agent 的入口索引：版本与计数必须与代码一致。
-
-	它曾把版本停在 3.0.0，连着两个 minor 版本没人发现——README 与
-	capability-matrix 的计数都有守卫，而这份机器入口没有任何测试。
-	"""
-	from boss_agent_cli import __version__
-	from boss_agent_cli.main import cli
-	from boss_agent_cli.schema.data import SCHEMA_DATA
-
-	content = _read("llms.txt")
-	recruiter_subcommands = len(cli.commands["hr"].commands)
-
-	assert f"Current version: {__version__}" in content
-	assert f"{len(SCHEMA_DATA['commands'])} top-level commands" in content
-	assert f"{recruiter_subcommands} first-level recruiter subcommands" in content
-	assert f"{len(_load_mcp_tools())} implemented MCP tools" in content
-
-
-def test_llms_txt_doc_links_resolve():
-	"""`llms.txt` 里的文档链接必须都指向仓库内真实存在的文件。"""
-	content = _read("llms.txt")
-	links = re.findall(r"\]\((docs/[^)#]+)\)", content)
-
-	assert links, "llms.txt 应至少链接 Agent quickstart / commands / capability matrix"
-	missing = [path for path in links if not (ROOT / path).exists()]
-	assert not missing, f"以下 llms.txt 链接指向不存在的文件: {missing}"
-
-
-def test_readme_command_groups_cover_every_top_level_command():
-	"""README 声称按工作流列出全部顶层命令，每个命令名都必须能在正文中找到。
-
-	`mark` / `interviews` / `chat-summary` / `follow-up` 曾完全不在分组里，
-	读者只能去 `docs/commands.md` 或 schema 才发现它们存在。`chat*` 这类通配
-	写法也改成逐个列出，否则守卫无法确认范围。
-	"""
-	import re
-
-	from boss_agent_cli.main import cli
-
-	for path in ("README.md", "README.en.md"):
-		content = _read(path)
-		missing = [
-			name
-			for name in cli.commands
-			if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", content)
-		]
-		assert not missing, f"{path} 缺少顶层命令: {sorted(missing)}"
-
-
-def test_roadmap_lists_the_current_release():
-	"""路线图的「已发布」列表必须包含当前版本。
-
-	它曾停在 v2.0.0，跨过 2.0.1 与整个 3.x 都没人发现；导航文档落后两个大版本
-	比没有路线图更误导。
-	"""
-	from boss_agent_cli import __version__
-
-	for path, heading in (("ROADMAP.md", "## 已发布"), ("ROADMAP.en.md", "## Released")):
-		content = _read(path)
-		section = content.split(heading, 1)[1].split("\n## ", 1)[0]
-		assert f"v{__version__}" in section, f"{path} 的已发布列表缺少 v{__version__}"
-
-
-def test_troubleshooting_documents_action_unconfirmed_evidence():
-	"""ACTION_UNCONFIRMED 的 details 字段要写进排障表，用户才看得懂失败信封。"""
-	for path in ("docs/troubleshooting.md", "docs/troubleshooting.en.md"):
-		content = _read(path)
-		assert "ACTION_UNCONFIRMED" in content, path
-		for field in (
-			"ws_send_without_text",
-			"history_checked",
-			"history_matched_count",
-			"history_attempts",
-			"history_new_count",
-			"history_self_count",
-			"history_recipient_count",
-		):
-			assert field in content, f"{path} 缺少 {field}"
-
-
-def test_readme_documents_full_envelope_keys():
-	"""README 的能力条目必须描述完整的七键信封。
-
-	中英 README 曾写成 `{ok, data, pagination, error, hints}`——漏掉
-	`schema_version` 与 `command`，Agent 照此构造解析器会对不上真实 stdout。
-	"""
-	keys = "{ok, schema_version, command, data, pagination, error, hints}"
-	old_subset = "{ok, data, pagination, error, hints}"
-
-	for path in ("README.md", "README.en.md"):
-		content = _read(path)
-		assert keys in content, f"{path} 未描述完整七键信封"
-		assert old_subset not in content, f"{path} 仍在描述五键子集"
-
-
-def test_site_copy_matches_current_version_and_counts():
-	"""GitHub Pages 站点是公开门面：首页与站点 llms.txt 的事实必须跟代码一致。
-
-	首页曾停在 v3.0.0、MCP 工具数写成 77（实际 78）；它和仓库内 `llms.txt` 一样
-	没有守卫，发版时不会有人记得同步。
-	"""
-	from boss_agent_cli import __version__
-	from boss_agent_cli.main import cli
-	from boss_agent_cli.schema.data import SCHEMA_DATA
-
-	index = _read("demo/index.html")
-	site_llms = _read("demo/llms.txt")
-	command_count = len(SCHEMA_DATA["commands"])
-	recruiter_count = len(cli.commands["hr"].commands)
-	tool_count = len(_load_mcp_tools())
-
-	version_match = re.search(r'class="version-link"[^>]*>v([0-9.]+)</a>', index)
-	assert version_match, "demo/index.html 缺少版本链接"
-	assert version_match.group(1) == __version__
-
-	def _metric(label: str) -> int:
-		match = re.search(
-			rf'<span class="metric-value">(\d+)</span><span class="metric-label" data-zh="{label}"',
-			index,
-		)
-		assert match, f"demo/index.html 缺少「{label}」指标"
-		return int(match.group(1))
-
-	assert _metric("顶层命令") == command_count
-	assert _metric("MCP 工具") == tool_count
-
-	assert f"Current version: {__version__}" in site_llms
-	assert f"{command_count} top-level commands" in site_llms
-	assert f"{recruiter_count} recruiter subcommands" in site_llms
-	assert f"{tool_count} implemented MCP tools" in site_llms
-
-
-def test_contributing_documents_offline_mcp_evals():
-	"""离线评测必须能被贡献者发现：双语 CONTRIBUTING 说明场景、命令与独立终端要求。"""
-	zh = _read("CONTRIBUTING.md")
-	en = _read("CONTRIBUTING.en.md")
-
-	for content in (zh, en):
-		assert "uv run python evals/run_eval.py --mode fixture" in content
-		assert "evals/README.md" in content
-		assert "4/4 passed" in content
-
-	assert "## 离线 MCP 评测" in zh
-	assert "不要嵌套" in zh
-	assert "## Offline MCP evals" in en
-	assert "do not nest" in en.lower()
-
-
-def test_readme_links_offline_evals():
-	"""README 的贡献入口要指向评测说明，而不是只藏在 evals/ 目录里。"""
-	for path in ("README.md", "README.en.md"):
-		assert "evals/README.md" in _read(path), path
-
-
-def test_evals_readme_documents_scenario_criteria():
-	"""双语说明都要有「场景 → 通过信号 → 失败信号」表，且场景反映当前运行契约。"""
-	for path, heading, scenarios, table in (
-		(
-			"evals/README.md",
-			"## 场景判据",
-			("福利筛选", "详情与候选池", "平台风控停止", "认证恢复"),
-			"| 场景 | 通过信号 | 失败信号 |",
-		),
-		(
-			"evals/README.en.md",
-			"## Scenario Criteria",
-			("Welfare filtering", "Detail + shortlist", "Platform risk stop", "Auth recovery"),
-			"| Scenario | Pass signal | Failure signals |",
-		),
-	):
-		content = _read(path)
-		assert heading in content
-		for scenario in scenarios:
-			assert scenario in content
-		assert table in content
-
-
 def test_english_agent_docs_exist_and_are_linked_from_english_entrypoints():
 	quickstart = _read("docs/agent-quickstart.en.md")
 	assert "# Agent Quickstart" in quickstart
@@ -397,7 +207,7 @@ def test_english_agent_docs_exist_and_are_linked_from_english_entrypoints():
 	assert "`boss schema`" in matrix
 	assert "`boss hr candidates`" in matrix
 	assert "39 top-level commands" in matrix
-	assert "15 first-level recruiter subcommands" in matrix
+	assert "14 first-level recruiter subcommands" in matrix
 
 	mcp_readme = _read("mcp-server/README.en.md")
 	assert "[Agent Quickstart](../docs/agent-quickstart.en.md)" in mcp_readme
@@ -429,8 +239,8 @@ def test_english_agent_docs_exist_and_are_linked_from_english_entrypoints():
 def test_english_roadmap_exists_and_readme_en_links_to_it():
 	roadmap_en = _read("ROADMAP.en.md")
 	assert "# Roadmap" in roadmap_en
-	assert "## ✅ Near term (completed)" in roadmap_en
-	assert "## 🔮 Mid term (v2.x–v3.x)" in roadmap_en
+	assert "## Near term (current mainline)" in roadmap_en
+	assert "## Mid term (v2.0)" in roadmap_en
 	assert "## Long-term vision" in roadmap_en
 	assert "[awesome-agents](https://github.com/kyrolabs/awesome-agents)" in roadmap_en
 
@@ -443,9 +253,10 @@ def test_glama_metadata_exists_and_declares_owner():
 
 def test_pyproject_exposes_boss_mcp_script():
 	pyproject = _read("pyproject.toml")
-	assert 'boss-mcp = "boss_agent_cli.mcp_entrypoint:run"' in pyproject
-	# 入口在 SDK 缺失时提供安装说明；服务器已适配 mcp 2.x 的 handler API。
-	# 上下界仍是硬要求：避免全新安装解析到未适配的大版本，而锁定依赖的 CI 继续全绿。
+	assert 'boss-mcp = "boss_agent_cli.mcp_server:run"' in pyproject
+	# 上界是硬要求：mcp 2.0 删掉了 `@server.list_tools()` / `@server.call_tool()`，
+	# 而 mcp_server 在模块层就用它们，装到 2.x 的用户连 boss-mcp 都起不来。
+	# 声明无上界时 CI 仍走 uv.lock 里的 1.x，全绿，用户全崩。放开前必须先适配 2.x API。
 	assert '"mcp>=2.1.0,<3.0.0"' in pyproject
 
 

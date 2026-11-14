@@ -114,24 +114,6 @@ def test_tool_formats_expose_callable_shortlist_subcommands():
 			assert {"add", "annotate", "compare"}.isdisjoint(schema["properties"])
 
 
-def test_tool_formats_have_single_availability_prefix():
-	"""可用性说明只拼接一次：availability_note 自带「可用性: 」前缀。
-
-	修复前 build_tool_catalog 又包了一层，导出给 Agent 的描述是
-	「可用性: 可用性: roles=...」。
-	"""
-	oai = format_openai_tools(SCHEMA_DATA)
-	anth = format_anthropic_tools(SCHEMA_DATA)
-	mcp = format_mcp_tools(SCHEMA_DATA)
-	descriptions = [
-		*(tool["function"]["description"] for tool in oai),
-		*(tool["description"] for tool in anth),
-		*(tool["description"] for tool in mcp),
-	]
-	assert all("可用性: 可用性:" not in description for description in descriptions)
-	assert all(description.count("可用性:") <= 1 for description in descriptions)
-
-
 def test_command_to_json_schema_required_args():
 	"""required=True 的参数应出现在 required 数组中。"""
 	cmd_spec = {
@@ -183,9 +165,7 @@ def test_invalid_format_raises():
 	assert payload["command"] == "schema"
 	assert payload["error"]["code"] == "INVALID_PARAM"
 	assert payload["error"]["recoverable"] is False
-	assert payload["error"]["message"] == "boss schema 的 --format 取值无效：'xml' 不在可选值 'native', 'openai-tools', 'anthropic-tools', 'mcp-tools' 中"
-	assert payload["error"]["recovery_action"] == "用 boss schema --help 查看参数说明"
-	assert payload["hints"]["next_actions"] == ["boss schema --help"]
+	assert payload["error"]["recovery_action"] == "修正参数"
 	assert result.stderr == ""
 
 

@@ -12,9 +12,8 @@ uv tool install boss-agent-cli   # uv: fast, isolated
 pipx install boss-agent-cli      # pipx: isolated
 pip install boss-agent-cli       # pip
 
-# Install the browser kernel used during login: under uv tool / pipx, patchright
-# is not on PATH; boss doctor prints a runnable install command when it is missing
-boss doctor
+# Install the browser used during login
+patchright install chromium
 
 # Run diagnostics and log in
 boss doctor
@@ -39,9 +38,10 @@ boss search "Golang" --city 广州 --welfare "双休,五险一金"
 # Complex filters can reuse a URL selected manually on the web UI
 boss search --url 'https://www.zhipin.com/web/geek/jobs?query=Golang&city=101280100&experience=104,105'
 
-# Step 3: inspect details and organize the local shortlist
+# Step 3: inspect details and continue the workflow
 boss detail <security_id>
 boss shortlist add <security_id> <job_id>
+boss apply <security_id> <job_id>
 ```
 
 Or submit a shared workflow and use its explicit `run_id` for status and recovery:
@@ -56,17 +56,10 @@ Parsing contract:
 - Read JSON envelopes from `stdout` only
 - `ok=true` means success; when `ok=false`, inspect `error.code` and `error.recovery_action`
 - `boss schema` also returns `supported_platforms`, `supported_recruiter_platforms`, and per-command `availability`, so agents can route tools by `role/platform`
-- A `boss show <#>` number is bound to the latest `search` / `recommend` snapshot; `data.index_snapshot` reports `source`, `page`, `count`, and `saved_at`, and `pagination.index_snapshot` on `search` / `recommend` reports the same identity for direct comparison. After a rerun or page change the old number points at new results, so locate it again
-
-### Agent authorization boundary
-
-Default to search, detail inspection, local shortlist management, local exports, and drafts based on confirmed facts. A general request to find work does not authorize `boss apply`, `boss greet`, `boss batch-greet`, or any other platform write.
-
-An agent may perform one outreach or application only when the user names the specific job in the current conversation and confirms again immediately before the action. After each external action, read the explicit platform result and ask before the next one. Do not create outreach queues, run unattended batches, reuse identical greetings, or retry a write whose outcome is unknown. On `ACCOUNT_RISK`, `ENVIRONMENT_RISK`, a CAPTCHA/security page, or a rate limit, preserve the checkpoint and stop; never bypass the platform control.
 
 ### Candidate crawl orchestration
 
-After `pip install "boss-agent-cli[crawl]"` (or `uv tool install "boss-agent-cli[crawl]"`; `uv sync --extra crawl` inside a source checkout), crawl uses only the isolated `<data-dir>/crawl/chrome-profile`. Fine-grained CLI commands can create a task and MCP can read/import it; `boss_wizard` can also advance the shared crawl workflow directly:
+After `uv sync --extra crawl`, crawl uses only the isolated `<data-dir>/crawl/chrome-profile`. Fine-grained CLI commands can create a task and MCP can read/import it; `boss_wizard` can also advance the shared crawl workflow directly:
 
 ```text
 boss crawl start <query> --city <city> --pages <n>
@@ -84,8 +77,6 @@ boss agent crawl --query "AI engineer" --city 杭州 --pages 3 --with-detail --r
 ```
 
 Hooks are disabled by default. Only when you have authorization may you explicitly pass `--hook-profile screenshot-full --hook-dir <directory containing SHA256SUMS>`; this project does not redistribute third-party scripts. To halt a task, run `boss crawl stop <run_id>`. On `risk_stopped`, the shared lock in the same `data_dir` blocks new crawls and resumes before browser construction. Keep the `run_id`; the user must confirm recovery on the intended official business page, run `boss clean --risk-lock`, and explicitly run `boss crawl resume <run_id>`. Recovery belongs in `operator_actions`; agents must not clear the lock. Handle the budget before resuming `budget_stopped`; neither state permits recreating tasks or retrying in a loop. Local status/results/imports remain available.
-
-A crawl `run_id` has at most one executor at a time: while another `crawl start` / `crawl resume` / wizard crawl step is still executing it, the later call returns `CRAWL_BUSY` without sending a request, advancing the checkpoint or clearing a stop request. Follow `hints.next_actions` to check progress with `boss crawl status <run_id>` and resume once it has ended; never resume the same `run_id` concurrently, and do not `--stop` a healthy execution just to take its place. `status` / `results` / `stop` are unaffected, different `run_id` values never block each other, and the execution right is released by the operating system when the executing process exits abnormally, with no lock file to clean up.
 
 ### Recruiter workflow
 
@@ -129,17 +120,8 @@ Common recovery actions:
 - `RATE_LIMITED`: declared replay-safe reads can use bounded cooldowns; verify write outcomes first
 - `REQUEST_BUDGET_EXHAUSTED`: the shared lease, rolling 60-second budget or cooldown exceeded this acquisition's wait limit; the current operation was not sent. Keep the checkpoint, inspect concurrency and `retry_after_seconds`, then explicitly resume without automatic retries or unlocking. A common `data_dir` shares limits by default; `request_budget_dir` explicitly groups directories. See [shared budget settings](commands.en.md#shared-request-budget-and-cooldown). Interrupted confirmation after a write remains `ACTION_UNCONFIRMED`; verify the outcome first
 - `NOT_SUPPORTED`: switch to a platform or workflow goal reported as available by schema
-- `BROWSER_KERNEL_MISSING`: the Chromium revision required by patchright is not installed (returned by every command that launches a browser: `search` / `detail` / `greet` / `chat` / `me` / `wizard`, and by `resume export --format pdf`). This is a deterministic failure — neither retrying nor `--resume` will help. Run the kernel install command in `recovery_action` — the envelope gives the interpreter that runs boss plus `-m patchright install chromium`, which works under `uv tool install` too — then use the `boss doctor` command in `hints.next_actions` (scoped to this data directory) to verify the installed revision
-- Writes with an unknown outcome: both CLI and MCP envelopes carry `error.details.replay_safe`; when it is `false` (or `outcome_unknown=true`), the action may already have taken effect — verify the platform state and never retry automatically. Interrupted reads report `replay_safe=true` and may be retried under the channel rules. `ACTION_UNCONFIRMED`, `GREET_RESULT_UNKNOWN`, `LOCATION_RESULT_UNKNOWN` and `RESUME_ACCEPT_RESULT_UNKNOWN` gain `replay_safe: false` and `outcome_unknown: true` from the error-code registry; `LOCAL_STATE_WRITE_FAILED` has a confirmed platform result and gains only `replay_safe: false`; `UNKNOWN` means the platform response could not be recognized and is likewise never retried automatically (the browser channel reports a non-JSON write response as `ACTION_UNCONFIRMED`). These two fields take precedence even when the command reports bare `sent: null` or `accepted: null`
-- `ACTION_UNCONFIRMED`: verify the dispatched write first. Candidates check greetings with `boss chat` and applications with `boss me --section deliver`; recruiters check `boss hr chatmsg <friend_id>`. Use the envelope's `hints.next_actions` to retain the current data directory; never resend automatically. A wizard write step records this marker before dispatching, so if the executor is terminated before the result is confirmed, `--resume` does not replay the step but returns the same error code with the verification command in `recovery_action` (that failure is delivered as an `error` envelope and carries no `hints`)
-- `UNKNOWN`: the platform returned an unrecognized error. A write response cannot prove the action did not happen, so treat it as the unknown-outcome write above; do not retry it as a transient network error just because the code is not `ACTION_UNCONFIRMED`. `batch-greet` and `boss wizard` stop in place instead of resending
 - `WORKFLOW_TIMEOUT`: a normal wizard timeout retains its `run_id`; adjust the deadline and explicitly run `boss wizard --resume <run_id>`. If MCP reports `outcome_unknown=true`, verify unconfirmed actions before retrying
-- `WORKFLOW_BUSY`: a `run_id` has at most one executor at a time. While another invocation (another terminal, agent, or MCP call) is still executing it, this call runs no steps and leaves the checkpoint untouched. Follow `hints.next_actions` to check progress with `boss wizard --status <run_id>` and resume once it has ended; never resume the same `run_id` concurrently, and do not `--stop` a healthy execution just to take its place. `--status` and `--stop` are unaffected, different `run_id` values never block each other, and the execution right is returned automatically when the executing process exits abnormally, with nothing to clean up
-- `CRAWL_BUSY`: a crawl `run_id` has at most one executor at a time. While another `crawl start` / `crawl resume` / wizard crawl step is still executing it, this call sends no request, does not advance the checkpoint and does not clear a stop request. Follow `hints.next_actions` to check progress with `boss crawl status <run_id>` and resume once it has ended; never resume the same `run_id` concurrently, and do not `--stop` a healthy execution just to take its place. `status` / `results` / `stop` are unaffected, different `run_id` values never block each other, and the execution right is released by the operating system when the executing process exits abnormally, with no lock file to clean up
-- `CRAWL_UNAVAILABLE`: the crawl runtime is unavailable, most commonly because the default install does not include the optional `crawl` dependencies. Entry points return it before creating a run or starting a background process, and retrying or resuming does not change the outcome; install `boss-agent-cli[crawl]` as `error.recovery_action` says, then run the original command again.
-- `INVALID_PARAM`: correct the input parameters, such as city, welfare filters, or page number; on the MCP side this also covers unknown tool names, argument types that do not match the declared `inputSchema` (for example passing `dry_run` as the string `"true"`), and argument names outside `inputSchema.properties` (every tool schema declares top-level `additionalProperties: false`). Enum arguments (`format` / `sort` / `from_who` / `section` / `detail_status` / `tone` / `lang` / `type`) passed as an explicit empty string reach the CLI verbatim and return its value diagnostic with the allowed choices instead of silently falling back to a default; `null` or an omitted key still means omitted. An invalid `boss_wizard.action` (such as `resum`, `STOP`, or an empty string) is likewise rejected before the CLI with the allowed `run / resume / status / stop` values instead of silently starting a new workflow run; only an omitted value or `null` falls back to the default `run`
-
-When a subcommand is missing or unknown, `hints.next_actions` lists help commands for the available subcommands, such as `boss resume init --help`. Read the help first, then choose an action and supply its required parameters.
+- `INVALID_PARAM`: correct the input parameters, such as city, welfare filters, or page number
 
 ## 4) Export tool protocols
 
@@ -151,7 +133,7 @@ boss schema --format anthropic-tools
 boss schema --format mcp-tools
 ```
 
-All three tool formats use the shared runtime catalog of 79 MCP tools, with matching names and input parameters. Native schema continues to describe the CLI's 39 top-level commands.
+All three tool formats use the shared runtime catalog of 78 MCP tools, with matching names and input parameters. Native schema continues to describe the CLI's 39 top-level commands.
 
 Further reading:
 - [Agent Host Examples](agent-hosts.en.md)

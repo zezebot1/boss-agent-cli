@@ -35,7 +35,7 @@ In Cursor Settings → MCP, add a stdio server that points to this repo's `mcp-s
 }
 ```
 
-Once enabled, Composer will discover all 79 implemented MCP tools, including `boss_wizard`, candidate search/apply/chat workflows, recruiter candidate workflows, local resume tools, and AI helpers.
+Once enabled, Composer will discover all 78 implemented MCP tools, including `boss_wizard`, candidate search/apply/chat workflows, recruiter candidate workflows, local resume tools, and AI helpers.
 
 For Windows / VS Code-style `mcp.json`, use escaped backslashes in the project path:
 
@@ -74,7 +74,7 @@ When the user asks to search jobs, inspect job details, or organize candidate jo
 3. If not logged in, run `boss login` and ask the user to scan if needed
 4. Use `boss search <query> --city <city> --welfare <keywords>` for discovery
 5. Use `boss detail <security_id>` to inspect a matching job
-6. Use `boss shortlist add` for local organization; draft job-specific materials from verified user facts
+6. Use `boss shortlist add`, `boss apply`, or `boss greet` according to the user's goal
 7. Read stdout JSON only; when `ok=false`, inspect `error.recovery_action`
 ```
 
@@ -96,12 +96,6 @@ boss shortlist add <security_id> <job_id>
 - `error.code`: recovery routing
 - `error.recovery_action`: how the agent should recover
 
-## Authorization boundary
-
-Keep the default workflow read-only: search, inspect details, organize the local shortlist, export local reports, and draft materials from confirmed facts. Do not run `boss apply`, `boss greet`, `boss batch-greet`, or any platform write unless the user names the specific job in the current conversation and confirms immediately before the action.
-
-Perform one external action at a time, read the explicit platform result, then ask before the next job. Do not create outreach queues, run unattended bulk actions, reuse identical greetings, or retry an action with an unknown result. On `ACCOUNT_RISK`, `ENVIRONMENT_RISK`, a verification page, or a rate limit, stop and retain the checkpoint; do not bypass platform controls.
-
 ## Recovery flow
 
 Recommended order:
@@ -116,7 +110,7 @@ Common branches:
 
 - `AUTH_REQUIRED` / `AUTH_EXPIRED`: run `boss login` again
 - `INVALID_PARAM`: return to `boss schema` and validate parameter names
-- `RATE_LIMITED`: stop external actions, keep the checkpoint, and wait for an explicit user decision before any retry
+- `RATE_LIMITED`: wait before retrying; do not continue sensitive automation
 - `ACCOUNT_RISK`: stop the workflow, preserve its checkpoint, and resume only after the account-risk condition is resolved
 - `ENVIRONMENT_RISK`: stop the workflow the same way; do not refresh tokens, re-login, or retry, and resume only after the user has confirmed the page state in the same dedicated browser profile
 

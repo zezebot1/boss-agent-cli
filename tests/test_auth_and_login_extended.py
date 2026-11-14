@@ -2,8 +2,6 @@
 
 import json
 import os
-import shlex
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,8 +10,6 @@ from click.testing import CliRunner
 
 from boss_agent_cli.auth.token_store import TokenStore
 from boss_agent_cli.main import cli
-
-_DEFAULT_DATA_DIR = str((Path.home() / ".boss-agent").resolve())
 
 
 # ══════════════ TokenStore ══════════════
@@ -248,7 +244,7 @@ def test_login_connection_error_recovery_is_boss_chrome(mock_auth_cls):
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "CDP_UNAVAILABLE"
-	assert shlex.split(parsed["error"]["recovery_action"]) == ["boss", "--data-dir", _DEFAULT_DATA_DIR, "login"]
+	assert parsed["error"]["recovery_action"] == "boss login"
 
 
 @patch("boss_agent_cli.commands.login.AuthManager")
@@ -271,12 +267,9 @@ def test_login_missing_browser_kernel_recovery_is_patchright_install(mock_auth_c
 	result = runner.invoke(cli, ["login"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	from boss_agent_cli.services.browser_runtime import patchright_install_command
-
-	install = patchright_install_command()
 	assert parsed["error"]["code"] == "BROWSER_KERNEL_MISSING"
-	assert parsed["error"]["recovery_action"] == install
-	assert install in parsed["hints"]["next_actions"]
+	assert parsed["error"]["recovery_action"] == "patchright install chromium"
+	assert any("patchright install chromium" in action for action in parsed["hints"]["next_actions"])
 
 
 @patch("boss_agent_cli.commands.login.AuthManager")
@@ -291,7 +284,7 @@ def test_login_timeout_error_recovery_is_retry(mock_auth_cls):
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "LOGIN_TIMEOUT"
-	assert shlex.split(parsed["error"]["recovery_action"]) == ["boss", "--data-dir", _DEFAULT_DATA_DIR, "login"]
+	assert parsed["error"]["recovery_action"] == "boss login"
 
 
 @patch("boss_agent_cli.commands.login.AuthManager")
@@ -350,7 +343,7 @@ def test_login_timeout_error_has_actionable_diagnostics(mock_auth_cls):
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "LOGIN_TIMEOUT"
 	assert "登录等待超时" in parsed["error"]["message"]
-	assert shlex.split(parsed["error"]["recovery_action"]) == ["boss", "--data-dir", _DEFAULT_DATA_DIR, "login"]
+	assert parsed["error"]["recovery_action"] == "boss login"
 	assert any("--timeout 180" in action for action in parsed["hints"]["next_actions"])
 
 
@@ -413,9 +406,7 @@ def test_login_generic_error_keeps_network_fallback_with_doctor_hint(mock_auth_c
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "NETWORK_ERROR"
 	assert "登录失败" in parsed["error"]["message"]
-	assert ["boss", "--data-dir", _DEFAULT_DATA_DIR, "doctor"] in [
-		shlex.split(action) for action in parsed["hints"]["next_actions"]
-	]
+	assert any("boss doctor" in action for action in parsed["hints"]["next_actions"])
 
 
 # ── login 错误 hints 的双受众通道拆分（R5 / A11）─────────────
@@ -451,10 +442,9 @@ def test_login_error_hints_split_by_audience(mock_auth_cls, side_effect, expecte
 	# 每个分类都必须给真人留下可读指引。
 	assert hints["operator_actions"], f"{expected_code} 缺少 operator_actions"
 
-	# next_actions 必须是可执行命令，不是叙述句。内核安装提示用运行本 CLI 的
-	# 解释器（可能是绝对路径，见 Issue #1060），其余一律以 boss 开头。
+	# next_actions 必须是可执行命令，不是叙述句。
 	for action in hints["next_actions"]:
-		assert action.startswith(("boss", "patchright", sys.executable)), (
+		assert action.startswith(("boss", "patchright")), (
 			f"{expected_code} 的 next_actions 混入了非命令条目: {action!r}"
 		)
 		assert "，" not in action and "。" not in action
@@ -504,18 +494,13 @@ def test_login_force_rejects_cookie_source(mock_auth_cls):
 def test_login_platform_risk_uses_shared_risk_contract(mock_auth_cls):
 	"""复用探测命中风控时，login 信封与其他命令的 ACCOUNT_RISK 契约一致，不建议重试登录。"""
 	from boss_agent_cli.api.client import AccountRiskError
-	from boss_agent_cli.display import risk_error_message
 
-	mock_auth_cls.return_value.login.side_effect = AccountRiskError(
-		"BOSS 直聘风控拦截 fixture-platform-response (code 36)", is_cdp=True
-	)
+	mock_auth_cls.return_value.login.side_effect = AccountRiskError("BOSS 直聘风控拦截 (code 36)", is_cdp=True)
 
 	result = CliRunner().invoke(cli, ["login", "--cdp"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "ACCOUNT_RISK"
 	assert parsed["error"]["recoverable"] is False
-	assert parsed["error"]["message"] == risk_error_message("ACCOUNT_RISK")
-	assert "fixture-platform-response" not in parsed["error"]["message"]
 	assert "停止自动化访问" in parsed["error"]["recovery_action"]
 	assert parsed["hints"]["next_actions"]

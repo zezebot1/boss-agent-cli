@@ -6,13 +6,14 @@
 
 *🤖 A recruiting-platform CLI for people and AI agents — terminal wizard · welfare filtering · dual-role workflows · JSON envelopes.*
 
-[![Python](https://img.shields.io/badge/Python-≥3.11-3776AB?logo=python&logoColor=white&style=flat-square)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-≥3.10-3776AB?logo=python&logoColor=white&style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/can4hou6joeng4/boss-agent-cli?style=flat-square)](https://github.com/can4hou6joeng4/boss-agent-cli/releases)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/boss-agent-cli?style=flat-square)](https://pypi.org/project/boss-agent-cli/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/can4hou6joeng4/boss-agent-cli/pulls)
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fcan4hou6joeng4%2Fboss-agent-cli.svg)](https://mcptoplist.com/server/glama%2Fcan4hou6joeng4%2Fboss-agent-cli)
 
-[Getting Started](docs/getting-started.en.md) · [Architecture](docs/architecture.en.md) · [Agent Integration](#-agent-integration) · [Commands](#-commands) · [Troubleshooting](docs/troubleshooting.en.md) · [Roadmap](ROADMAP.en.md) · [中文](README.md) | **English**
+[Getting Started](docs/getting-started.en.md) · [Agent Integration](#-agent-integration) · [Commands](#-commands) · [Troubleshooting](docs/troubleshooting.en.md) · [Roadmap](ROADMAP.en.md) · [中文](README.md) | **English**
 
 <a href="demo/showcase/boss-agent-cli-showcase.mp4" title="Watch the 48-second product keynote">
   <img src="demo/showcase/boss-agent-cli-showcase.gif?v=keynote-20261008" alt="boss-agent-cli Aurora Keynote: welfare filtering, dual-role workflows and agent integration" width="100%">
@@ -38,8 +39,8 @@ Historical `operating_mode=assisted|research` configuration remains compatible, 
 - **Terminal wizard**: run `boss` or `boss wizard`, select a role, platform, and goal, then resume the same workflow through JSON, run IDs, or MCP
 - **Local shortlist & stats**: inspect details, read web favorited jobs with validity status and sync only active entries, organize candidates with local tags and notes, compare jobs offline, and see funnel stats — `shortlist` `stats` `watch` `preset` `favorites`
 - **AI job-hunting assist + local models**: JD analysis, resume polish, role-targeted optimization, keyword suggestions, resume optimization, shortlist fit reports, interview prep, chat coaching; local weights stay outside the Python package via Ollama/vLLM OpenAI-compatible endpoints — `ai analyze-jd` `ai suggest-keywords` `ai resume-optimize` `ai interview-prep` `ai chat-coach` `ai local configure` `ai local smoke`
-- **Schema-first + JSON envelope**: stdout is a JSON-only `{ok, schema_version, command, data, pagination, error, hints}` seven-key envelope, `boss schema` is the capability source of truth, and an **MCP server with 79 tools** exposes every implemented capability
-- **Recruiter workflow**: confirm recruiter identity, then candidate search, recommendations, first contact with built-in read-state cleanup, resumes, chats, replies, and job management — `hr whoami/candidates/recommendations/greet/location/applications/resume/chat/last-messages/reply/request-resume/jobs`
+- **Schema-first + JSON envelope**: stdout is a JSON-only `{ok, data, pagination, error, hints}` envelope, `boss schema` is the capability source of truth, and an **MCP server with 78 tools** exposes every implemented capability
+- **Recruiter workflow**: confirm recruiter identity, then candidate search, recommendations, first contact with built-in read-state cleanup, resumes, chats, replies, and job management — `hr whoami/candidates/recommendations/greet/applications/resume/chat/last-messages/reply/request-resume/jobs`
 - **Platform layer**: live `Platform` / `RecruiterPlatform` registries behind the global `--platform` option; `zhipin` (BOSS Zhipin) is the only registered platform
 
 ## 🚀 Quickstart
@@ -47,7 +48,7 @@ Historical `operating_mode=assisted|research` configuration remains compatible, 
 ```bash
 # Install (uv recommended; the browser core is only for user-triggered login / local export)
 uv tool install boss-agent-cli
-boss doctor   # prints a runnable browser-kernel install command when missing
+patchright install chromium
 
 # Human entrypoint: choose role, platform, and goal in the wizard
 boss
@@ -89,7 +90,7 @@ boss --platform zhipin search "Python"     # zhipin is the default, so --platfor
 Start here: [Agent Quickstart](docs/agent-quickstart.en.md) · [Capability Matrix](docs/capability-matrix.en.md) · [Host Examples](docs/agent-hosts.en.md)
 
 ```json
-// Option 1: MCP (recommended) — Claude Desktop / Cursor and other MCP hosts; MCP server with 79 tools
+// Option 1: MCP (recommended) — Claude Desktop / Cursor and other MCP hosts; MCP server with 78 tools
 { "mcpServers": { "boss-agent": { "command": "uvx", "args": ["--from", "boss-agent-cli[mcp]", "boss-mcp"] } } }
 ```
 
@@ -121,20 +122,20 @@ with BossClient(AuthManager(...)) as client:
 
 ## 📚 Commands
 
-`boss schema` exposes 39 top-level commands + 15 first-level recruiter subcommands, grouped by workflow:
+`boss schema` exposes 39 top-level commands + 14 first-level recruiter subcommands, grouped by workflow:
 
 - **Auth**: `login` · `logout` · `status` · `doctor`
-- **Discover**: `search` · `recommend` · `detail` · `show` · `cities` · `history`
+- **Discover**: `search` · `detail` · `show` · `cities` · `history`
 - **Organize**: `watch` · `preset` · `shortlist` · `stats` · `favorites`
 - **Resumable crawl**: `crawl configure/run/start/status/results/resume/stop/shortlist`
 - **Resume / AI**: `resume` · `me` · `ai analyze-jd` · `ai polish` · `ai optimize` · `ai fit` · `ai suggest-keywords` · `ai resume-optimize` · `ai cover-letter` · `ai interview-prep` · `ai chat-coach` · `ai local`
 - **Utility / workflow**: `wizard` · `schema` · `platforms` · `export` · `config` · `clean`
-- **Candidate actions**: `greet` · `batch-greet` · `apply` · `exchange` · `chat` · `chatmsg` · `chat-summary` · `mark` · `interviews` · `pipeline` · `digest` · `follow-up`
-- **Recruiter**: `hr whoami/applications/candidates/recommendations/greet/location/resume/chat/chatmsg/last-messages/reply/request-resume/accept-resume/download-resume/jobs`
+- **Candidate actions**: `greet` · `batch-greet` · `apply` · `exchange` · `chat*` · `pipeline` · `digest`
+- **Recruiter**: `hr whoami/applications/candidates/recommendations/greet/resume/chat/chatmsg/last-messages/reply/request-resume/accept-resume/download-resume/jobs`
 
-Full command tables, parameters, and welfare-matching internals: **[Command Reference](docs/commands.en.md)**. The capability source of truth is `boss schema` (with `--format openai-tools` / `anthropic-tools` / `mcp-tools` exports).
+Full command tables, parameters, and welfare-matching internals: **[Command Reference](docs/commands.en.md)**. The capability source of truth is `boss schema` (with `--format openai-tools` / `anthropic-tools` exports).
 
-Bulk crawl requires `pip install "boss-agent-cli[crawl]"` (or `uv tool install "boss-agent-cli[crawl]"`; `uv sync --extra crawl` inside a source checkout). It uses its own `<data-dir>/crawl/chrome-profile` and never attaches to a daily Chrome profile. Hooks are disabled by default; local scripts require both an explicit profile and a directory containing `SHA256SUMS`:
+Bulk crawl requires `uv sync --extra crawl`. It uses its own `<data-dir>/crawl/chrome-profile` and never attaches to a daily Chrome profile. Hooks are disabled by default; local scripts require both an explicit profile and a directory containing `SHA256SUMS`:
 
 ```powershell
 boss crawl configure --max-requests 20 --max-details 50 --max-seconds 600 --max-retries 1
@@ -172,7 +173,7 @@ Full checks, CDP launch examples, and error codes: **[Troubleshooting](docs/trou
 ```bash
 boss config list                      # view all settings
 boss config set log_level debug       # set the log level
-boss config reset log_level           # restore one setting to its default
+boss config reset                     # restore defaults
 ```
 
 Settings live in `~/.boss-agent/config.json`: request delays, batch-greet delay, log level, CDP URL, export dir, platform / role.
@@ -193,7 +194,7 @@ CLI (Click)
 **Invariants**: stdout is JSON-only · stderr holds logs · `exit 0/1` (optional `--exit-codes sysexits` for semantic codes) · errors carry `code/recoverable/recovery_action` · `boss schema` is the authoritative capability source.
 **Two audiences, one envelope**: `hints.next_actions` holds follow-up commands for the Agent to run; `hints.operator_actions` holds natural-language guidance for the human operator (scan a QR code, adjust filters in the browser — anything done away from the terminal). TTY renders only the latter, to stderr; an Agent should relay it to the operator.
 **Command or wizard**: single-shot, stateless capability calls go through top-level commands; anything needing cross-step state, resumability, or handing guidance to a human goes through `boss wizard` (goals listed under `wizard_catalog` in `boss schema`).
-**Stack**: Python ≥ 3.11 · Click · httpx · patchright / CDP (login, export, and declared browser adapters) · cryptography · sqlite3 (WAL) · pytest (2900+).
+**Stack**: Python ≥ 3.10 · Click · httpx · patchright / CDP (login, export, and declared browser adapters) · cryptography · sqlite3 (WAL) · pytest (2900+).
 
 ## 🔌 Local Storage
 
@@ -201,7 +202,7 @@ All state lives under `~/.boss-agent/` — encrypted tokens, cached searches, sh
 
 ## 🤝 Contributing
 
-See [CONTRIBUTING.en.md](CONTRIBUTING.en.md) and [Getting Started](docs/getting-started.en.md). TL;DR: fork → `feat/xxx` branch → write tests → `python scripts/quality_baseline.py` (on Chinese Windows, set `$env:PYTHONUTF8='1'` first) → PR. Reproducible offline MCP evals live in [`evals/README.md`](evals/README.md). By participating you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.en.md](CONTRIBUTING.en.md) and [Getting Started](docs/getting-started.en.md). TL;DR: fork → `feat/xxx` branch → write tests → `python scripts/quality_baseline.py` (on Chinese Windows, set `$env:PYTHONUTF8='1'` first) → PR.
 
 Thanks to everyone who has made boss-agent-cli better — go follow them! ❤️
 
@@ -212,8 +213,7 @@ Thanks to everyone who has made boss-agent-cli better — go follow them! ❤️
 ## ❤️ Support
 
 - If this project helps you, the most direct support is a [Star ⭐](https://github.com/can4hou6joeng4/boss-agent-cli), or sharing it with someone who is job hunting.
-- Hit a problem or have an idea? Open an [Issue](https://github.com/can4hou6joeng4/boss-agent-cli/issues) — or go straight to a PR. For security vulnerabilities, report privately via [SECURITY.md](SECURITY.md) — do not open a public issue.
-- Need help? Start with [Getting Support](SUPPORT.en.md): docs entry points, Discussions, Issues, and private security reporting.
+- Hit a problem or have an idea? Open an [Issue](https://github.com/can4hou6joeng4/boss-agent-cli/issues) — or go straight to a PR.
 - Curious about the rest of the fleet? Drop anchor at the home port [bobochang.cn](https://bobochang.cn) 🧭.
 
 This project benefits from [geekgeekrun](https://github.com/geekgeekrun/geekgeekrun) · [boss-cli](https://github.com/jackwener/boss-cli) · [opencli](https://github.com/jackwener/opencli) — thanks to all of them.

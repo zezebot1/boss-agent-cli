@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from click.testing import CliRunner
 
 from boss_agent_cli.commands.platforms import _render_platforms, platform_capability_data
 from boss_agent_cli.main import cli
-
-_DEFAULT_DATA_DIR = str((Path.home() / ".boss-agent").resolve())
 
 
 def test_platforms_outputs_local_capability_matrix() -> None:
@@ -51,32 +48,11 @@ def test_platforms_terminal_render_includes_status_legend(capsys) -> None:
 	_render_platforms(platform_capability_data())
 	captured = capsys.readouterr()
 
-	# TTY 渲染必须走 stderr：stdout 只留给七键 JSON 信封。
-	assert captured.out == ""
-	rendered = captured.err
+	rendered = captured.out + captured.err
 	assert "capability_status_legend" in rendered
 	assert "available" in rendered
 	assert "可用" in rendered
 	assert "not_supported" in rendered
-
-
-def test_platforms_next_actions_name_every_listed_platform() -> None:
-	"""``next_actions`` 要按本次列出的平台生成：``--platform`` 只接受真实平台名。
-
-	原来固定写成 ``boss --platform <name> status``，Agent 原样执行只会拿到
-	``INVALID_PARAM``（可选值只有 ``zhipin``），提示等于空转。
-	"""
-	runner = CliRunner()
-	result = runner.invoke(cli, ["platforms"])
-
-	assert result.exit_code == 0, result.output
-	payload = json.loads(result.output)
-	platform_names = [item["name"] for item in payload["data"]["platforms"]]
-	assert payload["hints"]["next_actions"] == [
-		*(f"boss --platform {name} --data-dir {_DEFAULT_DATA_DIR} status" for name in platform_names),
-		f"boss --data-dir {_DEFAULT_DATA_DIR} schema",
-	]
-	assert "<name>" not in " ".join(payload["hints"]["next_actions"])
 
 
 def test_platforms_can_filter_single_platform_by_registered_name() -> None:
@@ -98,7 +74,7 @@ def test_platforms_removed_platform_uses_json_error_envelope() -> None:
 		payload = json.loads(result.output)
 		assert payload["ok"] is False
 		assert payload["error"]["code"] == "INVALID_PARAM"
-		assert "不支持的平台" in payload["error"]["message"]
+		assert "unknown platform" in payload["error"]["message"]
 
 
 def test_platforms_unknown_platform_uses_json_error_envelope() -> None:
@@ -109,7 +85,7 @@ def test_platforms_unknown_platform_uses_json_error_envelope() -> None:
 	payload = json.loads(result.output)
 	assert payload["ok"] is False
 	assert payload["error"]["code"] == "INVALID_PARAM"
-	assert "不支持的平台" in payload["error"]["message"]
+	assert "unknown platform" in payload["error"]["message"]
 
 
 def test_platforms_can_filter_by_capability_status_groups() -> None:
@@ -167,15 +143,14 @@ def test_platforms_unknown_capability_uses_json_error_envelope() -> None:
 	payload = json.loads(result.output)
 	assert payload["ok"] is False
 	assert payload["error"]["code"] == "INVALID_PARAM"
-	assert "不支持的能力" in payload["error"]["message"]
+	assert "unknown capability" in payload["error"]["message"]
 
 
 def test_platforms_terminal_render_includes_capability_columns(capsys) -> None:
 	_render_platforms(platform_capability_data(capability="apply"))
 	captured = capsys.readouterr()
 
-	assert captured.out == ""
-	rendered = captured.err
+	rendered = captured.out + captured.err
 	assert "capability\tcapability_status" in rendered
 	assert rendered.count("apply\tavailable") == 1
 	assert "apply\tnot_supported" not in rendered

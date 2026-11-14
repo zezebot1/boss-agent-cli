@@ -3,7 +3,6 @@
 Centralizes filtering logic shared by search, batch-greet, and export commands.
 """
 
-import difflib
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,37 +13,10 @@ from urllib.parse import parse_qs, urlparse
 from boss_agent_cli.api import endpoints
 from boss_agent_cli.api.client import PlatformRiskError
 from boss_agent_cli.api.request_budget import RequestBudgetExceeded, is_request_stop, request_control, request_controls_active
-from boss_agent_cli.api.models import BOSS_INTERNSHIP_RESPONSE_JOB_TYPE, JobItem, field_list, is_boss_online
+from boss_agent_cli.api.models import BOSS_INTERNSHIP_RESPONSE_JOB_TYPE, JobItem, is_boss_online
 from boss_agent_cli.services.job_identity import deduplicate_job_result
 
 # ── Ordinal lookups for threshold comparisons ───────────────────────
-
-# 城市码表里的「全国」是平台的不限城市码，不是具体城市
-NATIONWIDE_CITY = "全国"
-
-
-def city_constraint(city: str | None) -> str | None:
-	"""本地比较用的城市条件；全国视为没有城市条件。"""
-	return None if city == NATIONWIDE_CITY else city
-
-
-class UnsupportedCityError(ValueError):
-	"""城市名不在支持列表内。
-
-	单列一个类型，命令层才能把城市错误和「薪资 / 经验写错」分开给出指引
-	（前者指向 ``boss cities``，后者消息里已列出可选值）。
-	"""
-
-
-def ensure_supported_city(city: str | None) -> None:
-	"""校验城市名；未知城市必须在命令层报参数错误。
-
-	留到 ``search_jobs`` 里才发现时，`ValueError` 会被兜底成可重试的
-	`NETWORK_ERROR`，拿同一个非法城市重试永远修不好。
-	"""
-	if city and city not in endpoints.CITY_CODES:
-		raise UnsupportedCityError(f"未知城市: {city}，请换成支持的城市名（boss cities 可查看）")
-
 
 _EXPERIENCE_ORDER: dict[str, int] = {
 	"应届": 0,
@@ -323,36 +295,13 @@ def resolve_lookup_codes(value: str | None, lookup: dict[str, str], label: str) 
 	codes: list[str] = []
 	for part in _split_multi_value(value):
 		if part.isdigit():
-			code = part
-		else:
-			found = lookup.get(part)
-			if found is None:
-				raise ValueError(_unknown_lookup_message(part, lookup, label))
-			code = found
-		# 兼容标签可能与正式标签同码（如 10-15K 与 10-20K），按首次出现去重
-		if code not in codes:
-			codes.append(code)
+			codes.append(part)
+			continue
+		code = lookup.get(part)
+		if code is None:
+			raise ValueError(f"未知{label}: {part}")
+		codes.append(code)
 	return ",".join(codes) if codes else None
-
-
-_LOOKUP_LIST_LIMIT = 10
-_LOOKUP_SAMPLE_SIZE = 8
-
-
-def _unknown_lookup_message(part: str, lookup: dict[str, str], label: str) -> str:
-	"""未知标签附上可选值，调用方（人或 Agent）据此改参数而不是猜。
-
-	字面相近的值优先（``计箅机`` → ``计算机软件``）；完全没有相近值时列出可选值：
-	小表全列，大表（如 97 个行业）给出总数和前几项。
-	"""
-	close = difflib.get_close_matches(part, list(lookup), n=5, cutoff=0.4)
-	if close:
-		return f"未知{label}: {part}，相近的可选值: {'、'.join(close)}"
-	options = list(lookup)
-	if len(options) <= _LOOKUP_LIST_LIMIT:
-		return f"未知{label}: {part}，可选值: {'、'.join(options)}"
-	sample = "、".join(options[:_LOOKUP_SAMPLE_SIZE])
-	return f"未知{label}: {part}，共 {len(options)} 个可选值，例如: {sample}"
 
 
 def build_search_params(
@@ -495,10 +444,6 @@ class SearchPipelineStats:
 class SearchPipelineResult:
 	items: list[dict[str, Any]] = field(default_factory=list)
 	has_more: bool = False
-	# 平台原样报告的 hasMore：True/False 是平台明确给出的，None 表示缺失或非布尔值。
-	# 控制流用 has_more（缺失按停止处理），信封必须用 has_more_reported，
-	# 否则「平台没说」会被读成「确实没有下一页」（Issue #887）。
-	has_more_reported: bool | None = None
 	total: int | None = None
 	last_page: int = 0
 	stats: SearchPipelineStats = field(default_factory=SearchPipelineStats)
@@ -527,11 +472,10 @@ def prefilter_job(
 	reasons: list[str] = []
 
 	# City filter
-	city = city_constraint(criteria.city)
-	if city:
+	if criteria.city:
 		item_city = raw_item.get("cityName", "")
-		if item_city and city not in item_city:
-			reasons.append(f"城市不匹配: {item_city} != {city}")
+		if item_city and criteria.city not in item_city:
+			reasons.append(f"城市不匹配: {item_city} != {criteria.city}")
 
 	# Salary filter — reject only if candidate max is below required min
 	if criteria.salary:
@@ -627,8 +571,7 @@ def compute_match_score(item: dict[str, Any], welfare_results: list[str], criter
 		elif result.endswith("(描述)"):
 			score += 8
 
-	city = city_constraint(criteria.city)
-	if city and city in str(item.get("city", "")):
+	if criteria.city and criteria.city in str(item.get("city", "")):
 		score += 12
 
 	if criteria.salary:
@@ -711,7 +654,7 @@ def _fetch_and_check(
 	need_active=True 时总是取一次新详情（描述缓存只省福利那部分）。
 	list_welfare 是列表标签已经命中的福利结果，此时只需要补活跃度。
 	"""
-	welfare_list = field_list(raw_item, "welfareList")
+	welfare_list = raw_item.get("welfareList", [])
 	outcome = _DetailOutcome()
 	desc = ""
 	card_active = ""
@@ -799,7 +742,7 @@ def _fetch_and_check_guarded(
 		return _DetailOutcome()
 	def check_stopped() -> None:
 		if stop.is_set():
-			raise RequestBudgetExceeded("详情批次已停止，请求未发出", code="WORKFLOW_STOPPED")
+			raise RequestBudgetExceeded("detail batch stopped before dispatch", code="WORKFLOW_STOPPED")
 	try:
 		with request_control(check=check_stopped):
 			return _fetch_and_check(client, welfare_conditions, criteria, raw_item, cached_desc, **kwargs)
@@ -828,8 +771,6 @@ def _record_detail_outcome(
 	matched: list[dict[str, Any]],
 	stats: SearchPipelineStats | None,
 	unknown_descs: dict[str, int] | None,
-	*,
-	account: str = "",
 ) -> None:
 	"""主线程处理单个详情结果：写回描述缓存、统计活跃度、收集匹配项。"""
 	company = raw_item.get("brandName", "")
@@ -852,12 +793,10 @@ def _record_detail_outcome(
 			unknown_descs[key] = unknown_descs.get(key, 0) + 1
 		logger.info(f"  ❌ {company} - {title}（HR 活跃度未知: {outcome.active_desc or '详情未返回'}）")
 	elif result:
-		# is_greeted 在主线程中安全访问 cache；job_id（encryptJobId）跨请求稳定，
-		# securityId 每次搜索都会轮换，但两者都要有账号指纹才作为去重依据。
+		# is_greeted 在主线程中安全访问 cache
 		sid = result.get("security_id", "")
-		job_key = str(result.get("job_id") or "")
-		if sid or job_key:
-			result["greeted"] = cache.is_greeted(sid, job_id=job_key, account=account)
+		if sid:
+			result["greeted"] = cache.is_greeted(sid)
 		matched.append(result)
 		logger.info(f"  ✅ {company} - {title}（详情匹配）")
 	else:
@@ -880,7 +819,6 @@ def _check_details_parallel(
 	before_detail_request: Callable[[], None] | None = None,
 	detail_channel: str = "auto",
 	max_matches: int | None = None,
-	account: str = "",
 ) -> int:
 	"""Detail check, append matched to list. cache 操作在主线程完成。
 
@@ -946,7 +884,7 @@ def _check_details_parallel(
 					raise
 				logger.info(f"  ❌ {company} - {title}（查询失败）")
 				continue
-			_record_detail_outcome(outcome, raw_item, cache, logger, matched, stats, unknown_descs, account=account)
+			_record_detail_outcome(outcome, raw_item, cache, logger, matched, stats, unknown_descs)
 		return checked
 
 	stop = threading.Event()
@@ -969,7 +907,7 @@ def _check_details_parallel(
 			title = raw_item.get("jobName", "")
 			try:
 				outcome = future.result()
-				_record_detail_outcome(outcome, raw_item, cache, logger, matched, stats, unknown_descs, account=account)
+				_record_detail_outcome(outcome, raw_item, cache, logger, matched, stats, unknown_descs)
 			except SearchPipelinePlatformError:
 				logger.info(f"  ❌ {company} - {title}（详情接口失败）")
 				stop.set()
@@ -1010,7 +948,6 @@ def run_search_pipeline(
 	active: str | None = None,
 	before_detail_request: Callable[[], None] | None = None,
 	detail_channel: str = "auto",
-	account: str = "",
 ) -> SearchPipelineResult:
 	"""Run the full search pipeline: API search → list prefilter → welfare / active detail fallback.
 
@@ -1031,7 +968,6 @@ def run_search_pipeline(
 	current_page = start_page
 	last_page_scanned = 0
 	has_more = False
-	has_more_reported: bool | None = None
 	active_only = bool(active_level) and not welfare_conditions
 	if active_only:
 		max_pages = min(max_pages, detail_filter_max_pages(None, active_level))
@@ -1072,7 +1008,7 @@ def run_search_pipeline(
 					details = error["details"]
 			raise SearchPipelinePlatformError(code, message or "搜索结果获取失败", details=details)
 		platform_data = _unwrap_platform_data(client, raw)
-		job_list = field_list(platform_data, "jobList")
+		job_list = platform_data.get("jobList", [])
 		last_page_scanned = current_page
 		stats.pages_scanned += 1
 		stats.jobs_seen += len(job_list)
@@ -1088,11 +1024,7 @@ def run_search_pipeline(
 				stats.jobs_prefiltered += 1
 				logger.info(f"  预筛排除: {raw_item.get('jobName', '')} ({', '.join(reasons)})")
 				continue
-			if skip_greeted and cache.is_greeted(
-				str(raw_item.get("securityId") or ""),
-				job_id=str(raw_item.get("encryptJobId") or ""),
-				account=account,
-			):
+			if skip_greeted and cache.is_greeted(raw_item.get("securityId", "")):
 				continue
 			survivors.append(raw_item)
 
@@ -1118,7 +1050,7 @@ def run_search_pipeline(
 					need_active = decision == "detail"
 				match_results: list[str] = []
 				if welfare_conditions:
-					match_results = match_all_welfare(welfare_conditions, field_list(raw_item, "welfareList"), "")
+					match_results = match_all_welfare(welfare_conditions, raw_item.get("welfareList", []), "")
 				if need_active or (welfare_conditions and not match_results):
 					need_detail.append(_DetailTask(
 						raw_item,
@@ -1128,7 +1060,7 @@ def run_search_pipeline(
 					))
 					continue
 				item = JobItem.from_api(raw_item)
-				item.greeted = cache.is_greeted(item.security_id, job_id=item.job_id, account=account)
+				item.greeted = cache.is_greeted(item.security_id)
 				if skip_greeted and item.greeted:
 					continue
 				d = item.to_dict()
@@ -1162,7 +1094,6 @@ def run_search_pipeline(
 						before_detail_request=before_detail_request if sequential else None,
 						detail_channel=detail_channel,
 						max_matches=remaining,
-						account=account,
 					)
 					page_needed_detail = checked > 0
 					stats.detail_checks += checked
@@ -1174,7 +1105,7 @@ def run_search_pipeline(
 		else:
 			for raw_item in survivors:
 				item = JobItem.from_api(raw_item)
-				item.greeted = cache.is_greeted(item.security_id, job_id=item.job_id, account=account)
+				item.greeted = cache.is_greeted(item.security_id)
 				if skip_greeted and item.greeted:
 					continue
 				d = item.to_dict()
@@ -1193,10 +1124,7 @@ def run_search_pipeline(
 		))
 		matched.extend(page_matched)
 
-		raw_has_more = platform_data.get("hasMore")
-		# 控制流：缺失/非布尔一律视为「本页之后不再翻」，避免无界请求。
-		has_more = raw_has_more is True
-		has_more_reported = raw_has_more if isinstance(raw_has_more, bool) else None
+		has_more = platform_data.get("hasMore", False)
 		if not has_more:
 			break
 		if limit and len(matched) >= limit:
@@ -1212,7 +1140,6 @@ def run_search_pipeline(
 	return SearchPipelineResult(
 		items=matched,
 		has_more=has_more,
-		has_more_reported=has_more_reported,
 		total=len(matched),
 		last_page=last_page_scanned,
 		stats=stats,

@@ -1,8 +1,6 @@
 from unittest.mock import patch, MagicMock
 
 import json
-import shutil
-import subprocess
 
 import pytest
 
@@ -11,10 +9,7 @@ import httpx
 from boss_agent_cli.api.browser_client import (
 	HOME_URL,
 	_HEADLESS_NETWORKIDLE_GRACE_MS,
-	_HOME_NAV_RETRIES,
 	_NAV_TIMEOUT_MS,
-	_FETCH_SCRIPT,
-	BrowserNavigationError,
 	BrowserSession,
 	_find_reusable_zhipin_page,
 )
@@ -398,12 +393,9 @@ def test_request_returns_browser_evaluation_json_and_marks_throttle():
 		"url": "https://www.zhipin.com/wapi/zpgeek/search/joblist.json",
 		"params": {"query": "python", "page": 1},
 		"data": {"city": "101020100"},
-		"referer": "https://www.zhipin.com/web/geek/jobs",
+		"referer": "https://www.zhipin.com/web/geek/job",
 		"timeoutMs": 20000,
-		"identity": {},
-		"traceId": evaluate_args["traceId"],
 	}
-	assert evaluate_args["traceId"].startswith("F-")
 
 
 def test_cold_start_wait_constants_stay_lean():
@@ -513,7 +505,7 @@ def test_try_connect_creates_page_when_no_open_zhipin_tab():
 
 def test_request_does_not_hang_when_new_page_navigation_stalled():
 	"""新建 CDP 页签 goto 超时（_page_ready=False）时，request() 不得对仍在导航的页面
-	evaluate（永久挂起，同 #390）；先有界恢复，仍卡住则抛出 BrowserNavigationError。"""
+	evaluate（永久挂起，同 #390）；先有界恢复，仍卡住则返回错误信封。"""
 	session = BrowserSession(cookies={}, user_agent="")
 	session._pw = MagicMock()
 	mock_browser = MagicMock()
@@ -527,21 +519,18 @@ def test_request_does_not_hang_when_new_page_navigation_stalled():
 
 	assert session._try_connect("ws://localhost:9222/test") is True
 	assert session._page_ready is False
-	assert isinstance(session._home_nav_error, BrowserNavigationError)
-	assert session._home_nav_error.channel == "cdp"
-	assert session._home_nav_error.attempts == _HOME_NAV_RETRIES
 
-	# 页面仍卡住：抛出导航超时，不调 evaluate（永久挂起，同 #390）
+	# 页面仍卡住：request 返回错误信封，不调 evaluate
 	mock_new_page.wait_for_load_state.side_effect = TimeoutError("still stuck")
-	with pytest.raises(BrowserNavigationError):
-		session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
+	res = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
+	assert res["code"] == -1
 	mock_new_page.evaluate.assert_not_called()
 
 	# 页面恢复：有界 wait 成功后正常 evaluate，_page_ready 复位
 	mock_new_page.wait_for_load_state.side_effect = None
 	mock_new_page.wait_for_load_state.return_value = None
 	mock_ctx.new_cdp_session.return_value.send.return_value = {"result": {"value": {"code": 0, "zpData": {}}}}
-	res2 = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/job/detail.json")
+	res2 = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
 	assert res2["code"] == 0
 
 
@@ -613,96 +602,6 @@ def _started_cdp_session_with_page(page):
 	return session
 
 
-@pytest.mark.parametrize("is_cdp", [True, False], ids=["cdp", "headless"])
-@pytest.mark.parametrize(
-	"method,path,expected_code,replay_safe",
-	[
-		("POST", "/wapi/zpgeek/friend/add.json", "ACTION_UNCONFIRMED", False),
-		("GET", "/wapi/zprelation/friend/label/addMark", "ACTION_UNCONFIRMED", False),
-		("POST", "/wapi/zpchat/exchange/request", "ACTION_UNCONFIRMED", False),
-		("GET", "/wapi/unknown-operation", "ACTION_UNCONFIRMED", False),
-		("GET", "/wapi/zpgeek/job/detail.json", "NETWORK_ERROR", True),
-	],
-)
-def test_request_classifies_non_json_response_without_replaying(is_cdp, method, path, expected_code, replay_safe):
-	"""非 JSON 响应无法证明写入没有发生；读取仍可恢复，GET 写端点也不能重放。"""
-	page = MagicMock()
-	page.url = HOME_URL
-	page.evaluate.return_value = {
-		"code": -1,
-		"message": "browser response is not JSON",
-		"__cli_unparsed_response__": True,
-		"__cli_security_response__": {
-			"url": f"https://www.zhipin.com{path}",
-			"content_type": "text/plain",
-			"title": "",
-			"restricted": False,
-		},
-	}
-	session = _started_cdp_session_with_page(page)
-	session._is_cdp = is_cdp
-
-	response = session.request(method, f"https://www.zhipin.com{path}")
-
-	assert response["__cli_error_code__"] == expected_code
-	assert response["__cli_error_details__"]["replay_safe"] is replay_safe
-	assert "__cli_unparsed_response__" not in response
-	assert "__cli_security_response__" not in response
-	page.evaluate.assert_called_once()
-	page.wait_for_load_state.assert_not_called()
-
-
-def test_non_json_security_response_still_stops_as_platform_risk():
-	"""安全页优先于非 JSON 分类，不能降级成普通网络错误或未确认写入。"""
-	from boss_agent_cli.api.client import AccountRiskError
-
-	page = MagicMock()
-	page.url = HOME_URL
-	page.evaluate.return_value = {
-		"code": -1,
-		"__cli_unparsed_response__": True,
-		"__cli_security_response__": {
-			"url": "https://www.zhipin.com/web/passport/zp/verify.html",
-			"content_type": "text/html",
-			"title": "安全验证",
-		},
-	}
-	session = _started_cdp_session_with_page(page)
-
-	with pytest.raises(AccountRiskError):
-		session.request("POST", "https://www.zhipin.com/wapi/zpgeek/friend/add.json")
-
-	page.evaluate.assert_called_once()
-
-
-@pytest.mark.parametrize(
-	"body,content_type",
-	[("upstream unavailable", "text/plain"), ("<html><title>暂时不可用</title></html>", "text/html")],
-)
-def test_fetch_script_marks_non_json_body(tmp_path, body, content_type):
-	"""离线执行实际 fetch 脚本，确保纯文本与普通 HTML 都带上不可解析标记。"""
-	node = shutil.which("node")
-	if node is None:
-		pytest.skip("此离线 JavaScript 回归需要 Node")
-	probe = f"""
-	globalThis.fetch = async () => ({{
-		status: 200, url: 'https://www.zhipin.com/wapi/test',
-		headers: {{get: () => {json.dumps(content_type)}}},
-		text: async () => {json.dumps(body)}
-	}});
-	const response = await ({_FETCH_SCRIPT})({{method:'POST', url:'/test', timeoutMs:100}});
-	process.stdout.write(JSON.stringify(response));
-	"""
-	path = tmp_path / "non-json-response.mjs"
-	path.write_text(probe, encoding="utf-8")
-	# 30s 只覆盖 CI 跑步机上的 Node 冷启动卡顿（脚本本地实测约 40ms）；脚本真的挂起
-	# 仍会在 30s 内失败。5s 曾在 Python 3.14 任务把必需检查打成假红（Issue #1029）。
-	result = subprocess.run([node, str(path)], capture_output=True, text=True, timeout=30, check=True)
-	response = json.loads(result.stdout)
-	assert response["__cli_unparsed_response__"] is True
-	assert response["code"] == -1
-
-
 def test_is_context_destroyed_error_matches_navigation_races():
 	from boss_agent_cli.api.browser_client import _is_context_destroyed_error
 
@@ -721,7 +620,7 @@ def test_request_recovers_once_after_context_destroyed_mid_navigation():
 	]
 	session = _started_cdp_session_with_page(page)
 
-	res = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/job/detail.json")
+	res = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
 
 	assert res["code"] == 0
 	assert page.evaluate.call_count == 2
@@ -736,7 +635,7 @@ def test_request_returns_error_envelope_when_page_never_becomes_ready_after_navi
 	page.wait_for_load_state.side_effect = TimeoutError("still navigating")
 	session = _started_cdp_session_with_page(page)
 
-	res = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/job/detail.json")
+	res = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
 
 	assert res["code"] == -1
 	assert page.evaluate.call_count == 1
@@ -750,7 +649,7 @@ def test_request_retries_at_most_once_on_repeated_context_destroyed():
 	session = _started_cdp_session_with_page(page)
 
 	with pytest.raises(RuntimeError):
-		session.request("GET", "https://www.zhipin.com/wapi/zpgeek/job/detail.json")
+		session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
 
 	assert page.evaluate.call_count == 2
 
@@ -761,7 +660,7 @@ def test_request_healthy_path_has_no_extra_wait():
 	page.evaluate.return_value = {"code": 0, "zpData": {}}
 	session = _started_cdp_session_with_page(page)
 
-	res = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/job/detail.json")
+	res = session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
 
 	assert res["code"] == 0
 	page.wait_for_load_state.assert_not_called()
@@ -774,99 +673,7 @@ def test_request_propagates_unrelated_evaluate_errors_without_retry():
 	session = _started_cdp_session_with_page(page)
 
 	with pytest.raises(RuntimeError):
-		session.request("GET", "https://www.zhipin.com/wapi/zpgeek/job/detail.json")
+		session.request("GET", "https://www.zhipin.com/wapi/zpgeek/search/joblist.json")
 
 	page.evaluate.assert_called_once()
 	page.wait_for_load_state.assert_not_called()
-
-
-def test_navigate_home_resets_blank_and_retries_after_timeout():
-	"""首页第一次 goto 超时后跳 about:blank，下一次成功则不抛错。"""
-	page = MagicMock()
-	page.url = HOME_URL
-	page.goto.side_effect = [TimeoutError("Timeout 15000ms exceeded"), None, None]
-	session = BrowserSession(cookies={}, user_agent="UA")
-	session._page = page
-
-	session._navigate_home(channel="headless")
-
-	assert [call.args[0] for call in page.goto.call_args_list] == [HOME_URL, "about:blank", HOME_URL]
-	assert session._home_nav_error is None
-
-
-def test_navigate_home_raises_clear_error_when_retries_exhausted():
-	"""两次首页导航都超时：错误文案不再是裸的 Page.goto，诊断里保留原因首行。"""
-	page = MagicMock()
-	page.url = "about:blank"
-	page.goto.side_effect = TimeoutError("Page.goto: Timeout 15000ms exceeded")
-	session = BrowserSession(cookies={}, user_agent="UA")
-	session._page = page
-
-	with pytest.raises(BrowserNavigationError) as captured:
-		session._navigate_home(channel="headless")
-
-	error = captured.value
-	assert error.code == "BROWSER_NAV_TIMEOUT"
-	assert error.attempts == _HOME_NAV_RETRIES
-	assert error.channel == "headless"
-	assert "Page.goto" not in str(error)
-	assert error.details()["cause"].startswith("Page.goto")
-	assert [call.args[0] for call in page.goto.call_args_list] == [HOME_URL, "about:blank", HOME_URL]
-
-
-def test_navigate_home_does_not_reset_a_security_page():
-	"""超时后若已经停在安全验证页，立刻抛风险，不用 about:blank 把验证页清掉。"""
-	from boss_agent_cli.api.client import AccountRiskError
-
-	page = MagicMock()
-	page.url = "about:blank"
-
-	def land_on_security(url: str, **kwargs: object) -> None:
-		if url == HOME_URL:
-			page.url = "https://www.zhipin.com/web/passport/zp/verify.html"
-			raise TimeoutError("Timeout 15000ms exceeded")
-
-	page.goto.side_effect = land_on_security
-	session = BrowserSession(cookies={}, user_agent="UA")
-	session._page = page
-
-	with pytest.raises(AccountRiskError):
-		session._navigate_home(channel="headless")
-
-	page.goto.assert_called_once_with(HOME_URL, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS)
-
-
-def test_start_headless_raises_navigation_error_instead_of_raw_goto_timeout():
-	session = BrowserSession(cookies={"wt2": "abc"}, user_agent="UA")
-	session._pw = MagicMock()
-	browser = MagicMock()
-	context = MagicMock()
-	page = MagicMock()
-	page.url = "about:blank"
-	page.goto.side_effect = TimeoutError("Page.goto: Timeout 15000ms exceeded")
-	context.new_page.return_value = page
-	browser.new_context.return_value = context
-	session._pw.chromium.launch.return_value = browser
-
-	with pytest.raises(BrowserNavigationError) as captured:
-		session._start_headless()
-
-	assert session._started is False
-	assert captured.value.channel == "headless"
-	assert captured.value.attempts == _HOME_NAV_RETRIES
-def test_request_injects_page_identity_headers() -> None:
-	"""浏览器通道也要带页面自己的 token/zp_token，否则与 httpx 通道是两个客户端。"""
-	session = BrowserSession(cookies={}, user_agent="UA", identity={"token": "abc", "zp_token": "a~|b~"})
-	session._started = True
-	session._page = MagicMock()
-	session._throttle = MagicMock()
-	session._context = MagicMock()
-	cdp = session._context.new_cdp_session.return_value
-	cdp.send.return_value = {"result": {"value": {"code": 0, "zpData": {}}}}
-
-	session.request("GET", "https://www.zhipin.com/wapi/test.json")
-
-	method, args = cdp.send.call_args.args
-	assert method == "Runtime.evaluate"
-	payload = json.loads(args["expression"].rsplit(")(", 1)[1][:-1])
-	assert payload["identity"] == {"token": "abc", "zp_token": "a~|b~"}

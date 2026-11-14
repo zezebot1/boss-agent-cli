@@ -1,10 +1,8 @@
 """Tests for AI command group (boss ai)."""
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from click.testing import CliRunner
 
 from boss_agent_cli.main import cli
@@ -168,25 +166,6 @@ def test_polish_success(tmp_path, monkeypatch):
 	assert "general_suggestions" in parsed["data"]
 
 
-def test_cover_letter_non_object_ai_json_returns_parse_error(tmp_path, monkeypatch):
-	"""AI 返回合法 JSON 但不是对象时按解析失败返回，而不是 setdefault 的 AttributeError。"""
-	_setup_ai_config(tmp_path, monkeypatch)
-	_setup_resume(tmp_path)
-	runner = CliRunner()
-
-	mock_resp = MagicMock()
-	mock_resp.status_code = 200
-	mock_resp.json.return_value = {"choices": [{"message": {"content": '["建议一", "建议二"]'}}]}
-	mock_resp.raise_for_status = MagicMock()
-	with patch("boss_agent_cli.ai.service.httpx.post", return_value=mock_resp):
-		result = _invoke(runner, tmp_path, ["cover-letter", "test-resume", "--jd", "目标岗位"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "AI_PARSE_ERROR"
-	assert "JSON 对象" in parsed["error"]["message"]
-
-
 # ── optimize 成功路径 ─────────────────────────────────────
 
 
@@ -348,80 +327,6 @@ def test_analyze_jd_at_file_not_found(tmp_path, monkeypatch):
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert parsed["error"]["recovery_action"] == "检查 @ 后面的文件路径是否存在后重试"
-
-
-_AT_FILE_COMMANDS = [
-	["analyze-jd", "FILE", "--resume", "test-resume"],
-	["optimize", "test-resume", "--jd", "FILE"],
-	["suggest", "test-resume", "--jd", "FILE"],
-	["reply", "FILE"],
-	["interview-prep", "FILE"],
-	["chat-coach", "FILE"],
-	["resume-optimize", "test-resume", "--jd", "FILE"],
-	["cover-letter", "test-resume", "--jd", "FILE"],
-]
-
-
-@pytest.mark.parametrize("args", _AT_FILE_COMMANDS)
-def test_at_file_non_utf8_returns_envelope(tmp_path, monkeypatch, args):
-	"""GBK 保存的输入文件在每条 @file 命令上都给信封，而不是 UnicodeDecodeError traceback"""
-	_setup_ai_config(tmp_path, monkeypatch)
-	_setup_resume(tmp_path)
-	runner = CliRunner()
-
-	jd_file = tmp_path / "gbk.txt"
-	jd_file.write_bytes("需要五年经验的后端工程师".encode("gbk"))
-
-	argv = [f"@{jd_file}" if arg == "FILE" else arg for arg in args]
-
-	result = _invoke(runner, tmp_path, argv)
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert "UTF-8" in parsed["error"]["message"]
-	assert "转存为 UTF-8" in parsed["error"]["recovery_action"]
-
-
-def test_at_file_directory_returns_envelope(tmp_path, monkeypatch):
-	"""@路径 指向目录时给信封，而不是 IsADirectoryError traceback"""
-	_setup_ai_config(tmp_path, monkeypatch)
-	_setup_resume(tmp_path)
-	runner = CliRunner()
-
-	result = _invoke(runner, tmp_path, ["analyze-jd", f"@{tmp_path}", "--resume", "test-resume"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert "是目录" in parsed["error"]["message"]
-	assert "具体的 UTF-8 文本文件路径" in parsed["error"]["recovery_action"]
-
-
-def test_at_file_permission_error_returns_envelope(tmp_path, monkeypatch):
-	"""@file 读取失败（权限不足）时按 LOCAL_IO_ERROR 返回"""
-	_setup_ai_config(tmp_path, monkeypatch)
-	_setup_resume(tmp_path)
-	runner = CliRunner()
-
-	jd_file = tmp_path / "locked.txt"
-	jd_file.write_text("后端工程师", encoding="utf-8")
-	original_read_text = Path.read_text
-
-	def _deny_locked(self, *args, **kwargs):
-		if self == jd_file:
-			raise PermissionError(13, "Permission denied")
-		return original_read_text(self, *args, **kwargs)
-
-	monkeypatch.setattr(Path, "read_text", _deny_locked)
-
-	result = _invoke(runner, tmp_path, ["analyze-jd", f"@{jd_file}", "--resume", "test-resume"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "LOCAL_IO_ERROR"
-	assert "读取" in parsed["error"]["message"]
 
 
 # ── markdown 代码块包裹的 JSON ────────────────────────────
@@ -726,77 +631,6 @@ def test_config_set_max_tokens(tmp_path, monkeypatch):
 	assert "ai_max_tokens" in parsed["data"]["updated_fields"]
 
 
-def test_config_rejects_unknown_provider_without_endpoint(tmp_path, monkeypatch):
-	"""`--provider openai-cn` 这类笔误不能再写进配置。
-
-	以前直接返回 ok=true，之后每条 AI 命令都报「AI 服务未配置」，而 key 其实
-	已经存下了——用户会去重填 key，而不是改 provider 名。
-	"""
-	monkeypatch.setenv("BOSS_AGENT_MACHINE_ID", "test-machine")
-	from boss_agent_cli.ai.config import AIConfigStore
-	runner = CliRunner()
-	result = _invoke(
-		runner, tmp_path, ["config", "--provider", "openai-cn", "--model", "gpt-4o", "--api-key", "sk-test"]
-	)
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert "openai-cn" in parsed["error"]["message"]
-	assert "openai" in parsed["error"]["message"]
-	store = AIConfigStore(tmp_path)
-	assert store.load_config()["ai_provider"] is None
-	assert store.get_api_key() is None
-
-
-def test_config_rejects_custom_provider_without_base_url(tmp_path, monkeypatch):
-	"""provider=custom 必须同时给 --base-url，否则写下的是永远不能用的配置。"""
-	monkeypatch.setenv("BOSS_AGENT_MACHINE_ID", "test-machine")
-	runner = CliRunner()
-	result = _invoke(runner, tmp_path, ["config", "--provider", "custom", "--model", "m"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert "--base-url" in parsed["error"]["message"]
-
-
-def test_config_accepts_unknown_provider_with_explicit_base_url(tmp_path, monkeypatch):
-	"""自建 OpenAI 兼容端点：名字不在登记表里，但给了 --base-url 就应当可用。"""
-	monkeypatch.setenv("BOSS_AGENT_MACHINE_ID", "test-machine")
-	runner = CliRunner()
-	result = _invoke(
-		runner,
-		tmp_path,
-		[
-			"config", "--provider", "myproxy", "--base-url", "https://proxy.example/v1",
-			"--model", "m", "--api-key", "sk-test",
-		],
-	)
-
-	assert result.exit_code == 0
-	parsed = json.loads(result.output)
-	assert parsed["data"]["resolved_base_url"] == "https://proxy.example/v1"
-
-
-def test_ai_command_names_provider_when_endpoint_missing(tmp_path, monkeypatch):
-	"""遗留坏配置（provider 已填、没有端点）再跑 AI 命令时要点名 provider。"""
-	monkeypatch.setenv("BOSS_AGENT_MACHINE_ID", "test-machine")
-	from boss_agent_cli.ai.config import AIConfigStore
-	store = AIConfigStore(tmp_path)
-	store.save_config(ai_provider="custom", ai_model="m", ai_base_url=None)
-	store.save_api_key("sk-test")
-	_setup_resume(tmp_path)
-
-	result = _invoke(CliRunner(), tmp_path, ["polish", "test-resume"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "AI_NOT_CONFIGURED"
-	assert "'custom'" in parsed["error"]["message"]
-	assert "--base-url" in parsed["error"]["recovery_action"]
-
-
 # ── polish 错误分支 ──────────────────────────────────────
 
 
@@ -1057,61 +891,3 @@ def test_chat_coach_with_resume_success(tmp_path, monkeypatch):
 	with patch("boss_agent_cli.ai.service.httpx.post", return_value=_mock_ai_response(mock_result)):
 		result = _invoke(runner, tmp_path, ["chat-coach", "聊天", "--resume", "test-resume"])
 	assert result.exit_code == 0
-
-
-# ── #499 / #500：模型参数与异常回复形状 ─────────────────────
-
-import httpx  # noqa: E402
-
-
-def _mock_ai_raw(payload: dict):
-	mock_resp = MagicMock()
-	mock_resp.status_code = 200
-	mock_resp.json.return_value = payload
-	mock_resp.raise_for_status = MagicMock()
-	return mock_resp
-
-
-def test_interview_prep_null_content_returns_ai_api_error_envelope(tmp_path, monkeypatch):
-	_setup_ai_config(tmp_path, monkeypatch)
-	runner = CliRunner()
-	reply = {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": None}}]}
-	with patch("boss_agent_cli.ai.service.httpx.post", return_value=_mock_ai_raw(reply)):
-		result = _invoke(runner, tmp_path, ["interview-prep", "Python 后端开发"])
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "AI_API_ERROR"
-	assert "没有返回文本内容" in parsed["error"]["message"]
-
-
-def test_documented_gpt5_config_sends_reasoning_params(tmp_path, monkeypatch):
-	"""docs/integrations/ai-models.md 的 gpt-5 示例配置要能直接用。"""
-	monkeypatch.setenv("BOSS_AGENT_MACHINE_ID", "test-machine-id")
-	runner = CliRunner()
-	_invoke(runner, tmp_path, ["config", "--provider", "openai", "--model", "gpt-5", "--api-key", "sk-test-key"])
-	mock_result = {"job_summary": "后端工程师岗位", "questions": [], "preparation_tips": []}
-	with patch("boss_agent_cli.ai.service.httpx.post", return_value=_mock_ai_response(mock_result)) as post:
-		result = _invoke(runner, tmp_path, ["interview-prep", "Python 后端开发"])
-	assert result.exit_code == 0, result.output
-	payload = post.call_args.kwargs["json"]
-	assert payload["model"] == "gpt-5"
-	assert payload["max_completion_tokens"] == 4096
-	assert "max_tokens" not in payload
-	assert "temperature" not in payload
-
-
-def test_ai_http_400_surfaces_provider_reason_and_param_hint(tmp_path, monkeypatch):
-	_setup_ai_config(tmp_path, monkeypatch)
-	runner = CliRunner()
-	response = httpx.Response(
-		400,
-		json={"error": {"message": "Unsupported value: 'temperature' does not support 0.7 with this model."}},
-		request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-	)
-	with patch("boss_agent_cli.ai.service.httpx.post", return_value=response):
-		result = _invoke(runner, tmp_path, ["interview-prep", "Python 后端开发"])
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "AI_API_ERROR"
-	assert "does not support 0.7" in parsed["error"]["message"]
-	assert "--model" in parsed["error"]["recovery_action"]

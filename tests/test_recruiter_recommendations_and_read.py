@@ -1,7 +1,6 @@
 """推荐牛人及首次招呼安全契约；所有平台调用使用替身。"""
 import importlib.util
 import json
-import shlex
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -11,26 +10,13 @@ import httpx
 import pytest
 
 from boss_agent_cli.api import recruiter_endpoints as ep
-from boss_agent_cli.api.client import AccountRiskError, EnvironmentRiskError, EnvironmentRiskLockedError
+from boss_agent_cli.api.client import AccountRiskError
 from boss_agent_cli.api.recruiter_client import BossRecruiterClient, RecruiterAuthError
 from boss_agent_cli.auth.manager import AuthRequired, TokenRefreshFailed
-from boss_agent_cli.display import error_contract_for_code, risk_error_contract
+from boss_agent_cli.display import error_contract_for_code
 from boss_agent_cli.main import cli
-
 from boss_agent_cli.mcp_args import _build_args
 from boss_agent_cli.platforms.zhipin_recruiter import BossRecruiterPlatform
-
-_DEFAULT_DATA_DIR = str((Path.home() / ".boss-agent").resolve())
-
-
-def _hint_at(data_dir: str | Path, command: str) -> str:
-	"""指定数据目录下的招聘者后继命令。"""
-	return f"boss --data-dir {Path(data_dir).resolve()} {command}"
-
-
-def _hint(command: str) -> str:
-	"""默认数据目录下的招聘者后继命令。"""
-	return _hint_at(Path.home() / ".boss-agent", command)
 
 
 def test_recommendations_cli_returns_full_cards() -> None:
@@ -60,19 +46,7 @@ def test_recommendations_cli_reports_platform_failure(response: dict[str, Any], 
 	payload = json.loads(result.output)
 	assert payload["ok"] is False
 	assert payload["error"]["code"] == code
-	assert payload["error"]["recoverable"] is error_contract_for_code(code)[0]
-	if code == "AUTH_REQUIRED":
-		assert shlex.split(payload["error"]["recovery_action"]) == ["boss", "--data-dir", str((Path.home() / ".boss-agent").resolve()), "login"]
-		assert payload["hints"]["next_actions"] == [payload["error"]["recovery_action"]]
-	elif code in {"ACCOUNT_RISK", "ENVIRONMENT_RISK", "ENVIRONMENT_RISK_LOCKED"}:
-		# 风控解锁命令定位本次运行的数据目录（默认目录，Issue #978）。
-		assert payload["error"]["recovery_action"] == risk_error_contract(
-			code,
-			clean_command=f"boss --data-dir {_DEFAULT_DATA_DIR} clean --risk-lock",
-			doctor_command=f"boss --data-dir {_DEFAULT_DATA_DIR} doctor",
-		)[0]
-	else:
-		assert payload["error"]["recovery_action"] == error_contract_for_code(code)[1]
+	assert (payload["error"]["recoverable"], payload["error"]["recovery_action"]) == error_contract_for_code(code)
 	client.recommend_geeks.assert_called_once_with("job", page=1)
 	client.start_chat.assert_not_called()
 
@@ -227,43 +201,6 @@ def test_dry_run_has_no_auth_network_or_cache(greeting_args: list[str], tmp_path
 
 
 
-def test_greet_rejects_blank_message_with_executable_next_step(greeting_args: list[str]) -> None:
-	"""空招呼内容不会发出去；恢复指引要指回可执行的推荐列表。"""
-	args = [*greeting_args]
-	args[args.index("--message") + 1] = "   "
-	with patch("boss_agent_cli.commands.recruiter.recommendations.AuthManager") as auth, patch(
-		"boss_agent_cli.commands.recruiter.recommendations.get_recruiter_platform_instance"
-	) as factory:
-		result = CliRunner().invoke(cli, args)
-	assert result.exit_code == 1, result.output
-	payload = json.loads(result.output)
-	assert payload["error"]["code"] == "INVALID_PARAM"
-	expected = _hint_at(greeting_args[1], "hr recommendations --job-id job")
-	assert payload["hints"]["next_actions"] == [expected]
-	assert expected in payload["error"]["recovery_action"]
-	auth.assert_not_called()
-	factory.assert_not_called()
-
-
-def test_greet_blank_message_quotes_job_id_with_shell_metacharacters(greeting_args: list[str]) -> None:
-	"""job_id 是自由文本，拼进可执行的推荐命令前必须按 shell 参数转义。"""
-	args = [*greeting_args]
-	args[args.index("--job-id") + 1] = "job; echo pwn"
-	args[args.index("--message") + 1] = "   "
-	with patch("boss_agent_cli.commands.recruiter.recommendations.AuthManager") as auth, patch(
-		"boss_agent_cli.commands.recruiter.recommendations.get_recruiter_platform_instance"
-	) as factory:
-		result = CliRunner().invoke(cli, args)
-	assert result.exit_code == 1, result.output
-	payload = json.loads(result.output)
-	assert payload["error"]["code"] == "INVALID_PARAM"
-	expected = _hint_at(greeting_args[1], "hr recommendations --job-id 'job; echo pwn'")
-	assert payload["hints"]["next_actions"] == [expected]
-	assert expected in payload["error"]["recovery_action"]
-	auth.assert_not_called()
-	factory.assert_not_called()
-
-
 def test_greet_deduplicates_when_security_id_rotates(greeting_args: list[str], greeting_platform: MagicMock) -> None:
 	first = CliRunner().invoke(cli, greeting_args + ["--yes"])
 	assert first.exit_code == 0, first.output
@@ -305,60 +242,6 @@ def test_recruiter_reservation_is_atomic_and_separate_from_candidate_records(tmp
 		assert second.claim_recruiter_greet("another-geek", "job") is None
 
 
-def test_release_only_clears_pending_reservation(tmp_path: Path) -> None:
-	"""撤销预约只针对 pending：已发送或结果未知的记录不能被放开重发。"""
-	from boss_agent_cli.cache.store import CacheStore
-	with CacheStore(tmp_path / "cache.db") as cache:
-		assert cache.claim_recruiter_greet("geek", "job") is None
-		assert cache.release_recruiter_greet("geek", "job") is True
-		assert cache.claim_recruiter_greet("geek", "job") is None
-		cache.record_recruiter_greet("geek", "job")
-		assert cache.release_recruiter_greet("geek", "job") is False
-		assert cache.claim_recruiter_greet("geek", "job") == "sent"
-
-
-def test_greet_budget_stop_releases_unsent_reservation(greeting_args, greeting_platform):
-	"""预算在调度前停止：请求没有发出，撤销预约后预算恢复即可重试。"""
-	from boss_agent_cli.api.request_budget import RequestBudgetExceeded
-
-	greeting_platform.start_chat.side_effect = RequestBudgetExceeded("fixture budget stop")
-	first = CliRunner().invoke(cli, greeting_args + ["--yes"])
-	body = json.loads(first.output)
-	assert first.exit_code == 1
-	assert body["error"]["code"] == "REQUEST_BUDGET_EXHAUSTED"
-	assert body["error"]["details"] == {"request_sent": False}
-	assert (body["error"]["recoverable"], body["error"]["recovery_action"]) == error_contract_for_code(
-		"REQUEST_BUDGET_EXHAUSTED"
-	)
-
-	greeting_platform.start_chat.side_effect = None
-	greeting_platform.start_chat.return_value = {"code": 0, "zpData": {}}
-	second = CliRunner().invoke(cli, greeting_args + ["--yes"])
-	assert second.exit_code == 0, second.output
-	assert json.loads(second.output)["data"]["sent"] is True
-	assert greeting_platform.start_chat.call_count == 2
-
-
-def test_greet_browser_unavailable_releases_unsent_reservation(greeting_args, greeting_platform):
-	"""通道全部不可用等于请求未发出：修正通道后重试不应被旧的 pending 挡住。"""
-	from boss_agent_cli.api.browser_source import POLICIES, BrowserSourceUnavailable
-
-	policy = POLICIES["stored-cookie"]
-	greeting_platform.start_chat.side_effect = BrowserSourceUnavailable(policy, attempted=("cdp",))
-	first = CliRunner().invoke(cli, greeting_args + ["--yes"])
-	body = json.loads(first.output)
-	assert first.exit_code == 1
-	assert body["error"]["code"] == policy.failure_code
-	assert body["error"]["recoverable"] is True
-	assert policy.recovery_action in body["error"]["recovery_action"]
-
-	greeting_platform.start_chat.side_effect = None
-	greeting_platform.start_chat.return_value = {"code": 0, "zpData": {}}
-	second = CliRunner().invoke(cli, greeting_args + ["--yes"])
-	assert second.exit_code == 0, second.output
-	assert greeting_platform.start_chat.call_count == 2
-
-
 @pytest.mark.parametrize("message", ["访问环境存在异常", "环境异常", ""])
 def test_greet_environment_risk_does_not_suggest_more_requests(
 	greeting_args: list[str], greeting_platform: MagicMock, message: str,
@@ -370,31 +253,13 @@ def test_greet_environment_risk_does_not_suggest_more_requests(
 	assert body["error"]["code"] == "ENVIRONMENT_RISK"
 	assert body["error"]["recoverable"] is False
 	assert body["error"]["details"]["sent"] is None
-	# recovery_action 现在带本次运行的数据目录（Issue #978），文本仍以登记表的停止指引为准。
-	assert "停止自动化访问" in body["error"]["recovery_action"]
-	assert "clean --risk-lock" in body["error"]["recovery_action"]
+	assert error_contract_for_code("ENVIRONMENT_RISK")[1] in body["error"]["recovery_action"]
 	assert "不要自动重发" in body["error"]["recovery_action"]
-	# 机器可读提示:只有解锁命令定位本次运行目录，其余条目不得包含任何继续请求平台的命令。
-	next_actions = body["hints"]["next_actions"]
-	assert next_actions
-	assert all("boss " not in action or "clean --risk-lock" in action for action in next_actions)
+	assert not body["hints"].get("next_actions")
 	assert "boss hr chat" not in json.dumps(body["hints"])
 	greeting_platform.start_chat.assert_called_once()
 	greeting_platform.friend_list.assert_not_called()
 
-
-
-def test_greet_risk_response_keeps_platform_message_out_of_details(
-	greeting_args: list[str], greeting_platform: MagicMock,
-) -> None:
-	"""响应字典形态的风控：平台原文可能带临时凭据，不能写进 error.details。"""
-	greeting_platform.start_chat.return_value = {"code": 37, "message": "fixture-platform-response-token"}
-	result = CliRunner().invoke(cli, greeting_args + ["--yes"])
-	body = json.loads(result.output)
-	assert result.exit_code == 1
-	assert body["error"]["code"] == "ENVIRONMENT_RISK"
-	assert "platform_message" not in body["error"]["details"]
-	assert "fixture-platform-response-token" not in result.output
 
 
 def test_compliance_precedes_confirmation(greeting_args):
@@ -415,26 +280,13 @@ def greeting_platform():
 		yield platform
 
 
-def test_greet_success_points_back_to_the_conversation(greeting_args, greeting_platform):
-	"""招呼发出后要能回到会话跟进：成功信封原先 hints 为 null。"""
-	result = CliRunner().invoke(cli, greeting_args + ["--yes"])
-
-	assert result.exit_code == 0, result.output
-	parsed = json.loads(result.output)
-	assert parsed["data"]["sent"] is True
-	assert parsed["hints"]["next_actions"] == [
-		_hint_at(greeting_args[1], "hr chat"),
-		_hint_at(greeting_args[1], "hr last-messages"),
-	]
-
-
 def test_rejected_greeting_preserves_safe_platform_diagnostics(greeting_args, greeting_platform):
-	greeting_platform.start_chat.return_value = {"code": 9, "message": "额度不足 cookie=fixture-leak", "zpData": {"token": "secret"}}
+	greeting_platform.start_chat.return_value = {"code": 9, "message": "额度不足 cookie=private", "zpData": {"token": "secret"}}
 	result = CliRunner().invoke(cli, greeting_args + ["--yes"])
 	details = json.loads(result.output)["error"]["details"]
 	assert details["platform_code"] == 9
 	assert "额度不足" in details["platform_message"]
-	assert "fixture-leak" not in result.output
+	assert "private" not in result.output
 	assert "secret" not in result.output
 	assert details["sent"] is None
 	greeting_platform.start_chat.assert_called_once()
@@ -497,48 +349,20 @@ def test_cache_write_failure_preserves_sent_and_blocks_resend(greeting_args, gre
 	greeting_platform.start_chat.assert_called_once()
 
 
-def test_greet_unknown_send_failure_quotes_job_id_in_check_command(greeting_args, greeting_platform):
-	"""发送结果未知时给出的核对命令同样要转义 job_id。"""
-	greeting_args[greeting_args.index("--job-id") + 1] = "job; echo pwn"
-	greeting_platform.start_chat.side_effect = RuntimeError("boom")
-	result = CliRunner().invoke(cli, greeting_args + ["--yes"])
-	payload = json.loads(result.output)
-	assert payload["error"]["code"] == "GREET_RESULT_UNKNOWN"
-	assert payload["hints"]["next_actions"] == [
-		_hint_at(greeting_args[1], "hr chat --job-id 'job; echo pwn'"),
-	]
-
-
 @pytest.mark.parametrize("failure,code", [
-	(RecruiterAuthError("fixture-leak"), "AUTH_REQUIRED"),
-	(AuthRequired("fixture-leak"), "AUTH_REQUIRED"),
-	(TokenRefreshFailed("fixture-leak"), "TOKEN_REFRESH_FAILED"),
-	(AccountRiskError("fixture-leak"), "ACCOUNT_RISK"),
-	(EnvironmentRiskError("fixture-leak"), "ENVIRONMENT_RISK"),
-	(EnvironmentRiskLockedError("fixture-leak"), "ENVIRONMENT_RISK_LOCKED"),
+	(RecruiterAuthError("private"), "AUTH_REQUIRED"),
+	(AuthRequired("private"), "AUTH_REQUIRED"),
+	(TokenRefreshFailed("private"), "TOKEN_REFRESH_FAILED"),
+	(AccountRiskError("private"), "ACCOUNT_RISK"),
 ])
-def test_greeting_auth_and_risk_are_not_network_errors(greeting_args, greeting_platform, tmp_path, failure, code):
+def test_greeting_auth_and_risk_are_not_network_errors(greeting_args, greeting_platform, failure, code):
 	greeting_platform.start_chat.side_effect = failure
 	result = CliRunner().invoke(cli, greeting_args + ["--yes"])
 	body = json.loads(result.output)
 	assert body["error"]["code"] == code
-	if code in {"ACCOUNT_RISK", "ENVIRONMENT_RISK", "ENVIRONMENT_RISK_LOCKED"}:
-		# 风控异常走统一停止契约，且保留「不要重发本次招呼」的写操作约束；
-		# 解锁命令定位本次运行的数据目录（Issue #978）。
-		assert risk_error_contract(
-			code,
-			clean_command=f"boss --data-dir {tmp_path.resolve()} clean --risk-lock",
-			doctor_command=f"boss --data-dir {tmp_path.resolve()} doctor",
-		)[0] in body["error"]["recovery_action"]
-		assert "不要自动重发" in body["error"]["recovery_action"]
-		# 整份信封里不得再有裸解锁命令；出现时必须带本次运行的数据目录（Issue #978）。
-		dumped = json.dumps(body, ensure_ascii=False)
-		assert "boss clean --risk-lock" not in dumped
-		assert f"boss --data-dir {tmp_path.resolve()} clean --risk-lock" in dumped
-		assert body["hints"]["next_actions"]
 	assert body["error"]["details"]["sent"] is None
 	assert body["error"]["recoverable"] is False
-	assert "fixture-leak" not in result.output
+	assert "private" not in result.output
 	greeting_platform.start_chat.assert_called_once()
 
 

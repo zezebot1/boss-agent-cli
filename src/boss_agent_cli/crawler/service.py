@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import random
-import socket
 import time
 import uuid
 from dataclasses import dataclass, replace
-from collections.abc import Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -24,30 +23,19 @@ from boss_agent_cli.api.request_budget import (
 )
 from boss_agent_cli.api.zhipin_errors import normalize_risk_code
 from boss_agent_cli.cache.store import CacheStore
-from boss_agent_cli.compliance import require_capability_mode
-from boss_agent_cli.crawler.controls import (
-	CrawlLimitExceeded as CrawlLimitExceeded,
-	CrawlRuntimeUnavailable as CrawlRuntimeUnavailable,
-	CrawlStopRequested as CrawlStopRequested,
-	CrawlWorkflowStopRequested as CrawlWorkflowStopRequested,
-	CrawlTimeoutRequested as CrawlTimeoutRequested,
-)
 from boss_agent_cli.crawler.exporter import write_run_outputs
 from boss_agent_cli.crawler.hooks import (
 	HookInjection,
 	HookRegistrationError,
 )
+from boss_agent_cli.compliance import require_capability_mode
 from boss_agent_cli.crawler.transport import CrawlRiskError, CrawlTransport
-from boss_agent_cli.display import boss_command, risk_error_message, shell_argument
-from boss_agent_cli.services.file_lock import exclusive_file_lock, run_lock_path
-
-
-class CrawlBusyError(RuntimeError):
-	"""同一个 crawl run 正在由另一次调用执行：本次调用没有发出任何请求。"""
-
-	def __init__(self, run_id: str) -> None:
-		super().__init__(f"crawl run {run_id} 正在由另一次调用执行")
-		self.run_id = run_id
+from boss_agent_cli.crawler.controls import (
+	CrawlLimitExceeded as CrawlLimitExceeded,
+	CrawlStopRequested as CrawlStopRequested,
+	CrawlWorkflowStopRequested as CrawlWorkflowStopRequested,
+	CrawlTimeoutRequested as CrawlTimeoutRequested,
+)
 
 
 @dataclass(frozen=True)
@@ -133,50 +121,6 @@ class CrawlSettings:
 		)
 
 
-def crawl_int_setting(cfg: Mapping[str, Any], key: str, default: int, *, minimum: int = 1) -> int:
-	"""读取整数型 crawl 配置；显式值优先于默认值。
-
-	不能用 `value or default`：`max_retries=0` 是 `crawl configure` 明确接受的值，
-	用 or 会把 0 当成缺省并悄悄改回 1。
-	"""
-	value = cfg.get(key)
-	if value is None:
-		return default
-	try:
-		parsed = int(value)
-	except (TypeError, ValueError) as exc:
-		raise ValueError(f"crawl 配置项 {key} 必须是整数") from exc
-	if parsed < minimum:
-		raise ValueError(f"crawl 配置项 {key} 不能小于 {minimum}")
-	return parsed
-
-
-def crawl_chrome_path(value: Any) -> str | None:
-	"""校验 crawl 配置中的 chrome_path：字符串路径或 null。"""
-	if value is None:
-		return None
-	if not isinstance(value, str):
-		raise ValueError("crawl 配置项 chrome_path 必须是字符串或 null")
-	return value
-
-
-def crawl_cdp_port(value: Any) -> int:
-	"""校验 crawl 配置中的 cdp_port：1-65535 的整数。"""
-	try:
-		port = int(value)
-	except (TypeError, ValueError) as exc:
-		raise ValueError("crawl 配置项 cdp_port 必须是整数") from exc
-	if not 1 <= port <= 65535:
-		raise ValueError("crawl 配置项 cdp_port 必须在 1-65535 之间")
-	return port
-
-
-def unused_local_port() -> int:
-	with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-		connection.bind(("127.0.0.1", 0))
-		return int(connection.getsockname()[1])
-
-
 @dataclass(frozen=True)
 class CrawlOutcome:
 	run_id: str
@@ -192,7 +136,6 @@ class CrawlOutcome:
 	elapsed_seconds: int = 0
 	error: str = ""
 	risk_lock: dict[str, Any] | None = None
-	data_dir: Path | None = None
 
 	def as_dict(self) -> dict[str, Any]:
 		result = {
@@ -202,10 +145,7 @@ class CrawlOutcome:
 			"pages_completed": self.pages_completed,
 			"jobs_seen": self.jobs_seen,
 			"detail_checks": self.detail_checks,
-			"checkpoint": {
-				"next_page": self.next_page,
-				"resume_command": boss_command(f"crawl resume {shell_argument(self.run_id)}", data_dir=self.data_dir),
-			},
+			"checkpoint": {"next_page": self.next_page, "resume_command": f"boss crawl resume {self.run_id}"},
 			"output_paths": self.output_paths,
 			"requests_attempted": self.requests_attempted,
 			"detail_requests_attempted": self.detail_requests_attempted,
@@ -317,38 +257,20 @@ class CrawlService:
 		self._on_run_created = on_run_created
 		self._unpersisted_risk_lock: cdp_risk_lock.RiskLock | None = None
 		self._request_budget = RequestBudget.for_data_dir(data_dir)
-		self._lock_dir = data_dir / "cache" / "crawl-locks"
-
-	def execution_lock(self, run_id: str) -> AbstractContextManager[bool]:
-		"""同一 crawl run 的执行权：跨进程独占、不等待，进程退出时由操作系统释放。
-
-		只约束「执行」。`crawl status` / `crawl results` 等只读命令不取这把锁，执行
-		期间照常可用；不同 run 各用各的锁文件，互不阻塞。
-		"""
-		return exclusive_file_lock(run_lock_path(self._lock_dir, run_id))
-
-	@contextmanager
-	def _execution_right(self, run_id: str) -> Iterator[None]:
-		"""取得执行权，取不到就按「正在执行」拒绝，而不是排队等前一个执行器。
-
-		必须在读取断点之前取得：两次调用都读到旧游标时，后到者会从同一个页
-		重抓，把重复请求打给平台（Issue #1023）。
-		"""
-		with self.execution_lock(run_id) as acquired:
-			if not acquired:
-				raise CrawlBusyError(run_id)
-			yield
 
 	def create_and_run(self, settings: CrawlSettings) -> CrawlOutcome:
+		self._validate_settings(settings)
+		require_capability_mode(settings.operating_mode, "crawl")
+		require_capability_mode(settings.operating_mode, "crawl-cdp")
+		if settings.hook_profile != "none":
+			require_capability_mode(settings.operating_mode, "crawl-hook")
 		run_id = self.create(settings)
-		# on_run_created 发布 run_id 后，别的调用方可能已经推进了断点。新建与恢复
-		# 共用持锁后的断点读取，不能再假定 next_page=1（Issue #1023）。
-		return self.resume(run_id)
+		output_dir = self._data_dir / "crawl" / "runs" / run_id
+		return self._run(run_id, settings, next_page=1, output_dir=output_dir)
 
 	def create(self, settings: CrawlSettings) -> str:
 		"""Persist a new task so another process may run or resume it."""
 		self._check_risk_lock()
-		self._check_egress_consistency()
 		self._validate_settings(settings)
 		require_capability_mode(settings.operating_mode, "crawl")
 		require_capability_mode(settings.operating_mode, "crawl-cdp")
@@ -361,24 +283,6 @@ class CrawlService:
 			self._on_run_created(run_id)
 		return run_id
 
-	def _check_egress_consistency(self) -> None:
-		"""Refuse to start a run whose exit contradicts the locale it declares.
-
-		Inert unless ``BOSS_EGRESS_PROBE_URL`` is configured, so no probe traffic
-		happens by default and an unknown exit never blocks work.
-		"""
-		from boss_agent_cli.api.egress import ensure_egress_consistent, probe_egress
-		from boss_agent_cli.api.endpoints import DEFAULT_HEADERS
-
-		verdict = probe_egress()
-		if not verdict.exit_country:
-			return
-		ensure_egress_consistent(
-			exit_country=verdict.exit_country,
-			accept_language=str(DEFAULT_HEADERS.get("Accept-Language", "")),
-			timezone="Asia/Shanghai",
-		)
-
 	def resume(
 		self,
 		run_id: str,
@@ -387,36 +291,6 @@ class CrawlService:
 		with_detail: bool = False,
 		operating_mode: str | None = None,
 		clear_stop: bool = False,
-	) -> CrawlOutcome:
-		# 执行权先于断点读取：重叠恢复会在两个执行器各读一份旧游标后重复抓页，
-		# 再把同一页的请求打给平台（Issue #1023）。取不到就拒绝，不排队。
-		with self._execution_right(run_id):
-			return self._resume_locked(
-				run_id,
-				pages=pages,
-				with_detail=with_detail,
-				operating_mode=operating_mode,
-				clear_stop=clear_stop,
-			)
-
-	def has_resume_work(self, run: dict[str, Any], *, pages: int | None = None, with_detail: bool = False) -> bool:
-		"""只读判断快照是否还有恢复工作；真正执行前仍须取锁并重读断点。"""
-		if run["status"] != "completed":
-			return True
-		needs_more_pages = not bool(run["list_finished"]) and pages is not None and pages >= int(run["next_page"])
-		pending_details = with_detail and any(
-			not item["detail_done"] for item in self._cache.list_crawl_jobs(str(run["run_id"]))
-		)
-		return needs_more_pages or pending_details
-
-	def _resume_locked(
-		self,
-		run_id: str,
-		*,
-		pages: int | None,
-		with_detail: bool,
-		operating_mode: str | None,
-		clear_stop: bool,
 	) -> CrawlOutcome:
 		run = self._cache.get_crawl_run(run_id)
 		if run is None:
@@ -433,7 +307,9 @@ class CrawlService:
 		if with_detail:
 			settings = replace(settings, with_detail=True)
 		self._validate_settings(settings)
-		if not self.has_resume_work(run, pages=pages, with_detail=with_detail):
+		pending_details = any(not item["detail_done"] for item in self._cache.list_crawl_jobs(run_id))
+		needs_more_pages = not bool(run["list_finished"]) and pages is not None and pages >= int(run["next_page"])
+		if run["status"] == "completed" and not (needs_more_pages or (with_detail and pending_details)):
 			return self._completed_outcome(run)
 		self._check_risk_lock()
 		self._cache.update_crawl_run_params(run_id, settings.as_dict())
@@ -463,7 +339,6 @@ class CrawlService:
 			detail_requests_attempted=int(run["detail_requests_attempted"]),
 			elapsed_seconds=int(run["elapsed_seconds"]),
 			error=str(run.get("error", "")),
-			data_dir=self._data_dir,
 		)
 
 	def _run(
@@ -530,9 +405,10 @@ class CrawlService:
 					lambda: self._fetch_list(run_id, transport, budget, run_budget, settings, current_page),
 					max_retries=settings.max_retries,
 				)
-				# _fetch_list 已在有限重试范围内校验结构；未取得列表不能推进断点。
-				jobs_data = body["zpData"]
-				jobs = jobs_data["jobList"]
+				jobs_data = body.get("zpData", {}) if isinstance(body.get("zpData"), dict) else {}
+				jobs = jobs_data.get("jobList", [])
+				if not isinstance(jobs, list):
+					raise RuntimeError(f"第 {current_page} 页 jobList 不是列表")
 				for rank, raw in enumerate(jobs, 1):
 					if not isinstance(raw, dict):
 						continue
@@ -567,8 +443,7 @@ class CrawlService:
 			risk_lock = self._record_risk_lock(exc)
 		except PlatformRiskError as exc:
 			status = "risk_stopped"
-			# 平台响应原文可能带临时凭据，运行结果里只留登记表文案。
-			error = risk_error_message(exc.code)
+			error = str(exc)
 			keep_browser = True
 			risk_lock = exc.details.get("risk_lock")
 		except CrawlLimitExceeded as exc:
@@ -592,21 +467,13 @@ class CrawlService:
 		except CrawlStopRequested as exc:
 			status = "stopped"
 			error = str(exc)
-		except CrawlRuntimeUnavailable as exc:
-			# 可选依赖缺失是确定性失败：保存断点后原样抛出，由入口按 CRAWL_UNAVAILABLE
-			# 回报。落成普通的 stopped 会让调用方拿到成功信封与恢复指引（Issue #1050）。
+		except KeyboardInterrupt:
 			status = "stopped"
-			error = str(exc)
+			error = "execution interrupted; verify any unfinished operation before explicitly resuming"
 			raise
 		except Exception as exc:
 			status = "stopped"
 			error = str(exc)
-		except BaseException:
-			# SystemExit 等退出信号也会进入 finally：先保存中断断点，不能把未完成
-			# 的任务按默认状态记为 completed。原信号继续向外传播（Issue #1024）。
-			status = "stopped"
-			error = "execution interrupted; verify any unfinished operation before explicitly resuming"
-			raise
 		finally:
 			# Save progress before cleanup: a detached browser can fail to close.
 			self._cache.update_crawl_run_budget(
@@ -653,7 +520,6 @@ class CrawlService:
 			detail_requests_attempted=run_budget.detail_requests_attempted,
 			elapsed_seconds=run_budget.elapsed_seconds,
 			risk_lock=risk_lock,
-			data_dir=self._data_dir,
 		)
 
 	def _check_risk_lock(self) -> None:
@@ -726,10 +592,10 @@ class CrawlService:
 				security_id = str(row.get("security_id", ""))
 
 				def fetch_detail() -> dict[str, Any]:
-					# 结构校验与请求共用有限重试；失败时条目仍保留在待补队列。
-					return _unwrap_card(self._fetch_detail(run_id, transport, budget, run_budget, security_id))
+					return self._fetch_detail(run_id, transport, budget, run_budget, security_id)
 
-				card = self._with_retry(fetch_detail, max_retries=settings.max_retries)
+				detail = self._with_retry(fetch_detail, max_retries=settings.max_retries)
+				card = _unwrap_card(detail)
 				row.update(
 					{
 						"post_description": card.get("postDescription", ""),
@@ -781,9 +647,6 @@ class CrawlService:
 		self._raise_if_stop_requested(run_id)
 		if payload.get("code") not in (None, 0):
 			raise RuntimeError(f"第 {page_no} 页接口错误 code={payload.get('code')}: {payload.get('message', '')}")
-		data = payload.get("zpData")
-		if not isinstance(data, dict) or not isinstance(data.get("jobList"), list):
-			raise RuntimeError(f"第 {page_no} 页响应缺少有效的 zpData.jobList 列表")
 		return payload
 
 	def _fetch_detail(
@@ -870,11 +733,11 @@ def _normalize_job(raw: dict[str, Any], query: str, page_no: int, rank: int) -> 
 
 
 def _unwrap_card(payload: dict[str, Any]) -> dict[str, Any]:
-	data = payload.get("zpData")
-	card = data.get("jobCard") if isinstance(data, dict) else None
-	if not isinstance(card, dict):
-		raise RuntimeError("职位详情响应缺少有效的 zpData.jobCard 对象")
-	return card
+	data = payload.get("zpData", {})
+	if not isinstance(data, dict):
+		return {}
+	card = data.get("jobCard", {})
+	return card if isinstance(card, dict) else {}
 
 
 def _hook_metadata(hooks: tuple[HookInjection, ...]) -> list[dict[str, Any]]:

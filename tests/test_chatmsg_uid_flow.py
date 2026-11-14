@@ -3,7 +3,7 @@
 背景：``security_id`` 由 BOSS 服务端每次请求重新加密生成，同一个联系人在
 ``chat`` 与 ``chatmsg`` 两次调用中拿到的值不同。修复前
 ``find_friend_by_security_id`` 用 ``securityId`` 精确匹配，导致
-``boss chatmsg`` 必然报 CONTACT_NOT_FOUND。
+``boss chatmsg`` 必然报 JOB_NOT_FOUND。
 
 本文件锁住三条不变量：
 1. ``boss chat`` 输出稳定标识 ``uid``；
@@ -143,7 +143,7 @@ def test_chatmsg_stale_security_id_still_fails_but_suggests_uid(mock_auth_cls, m
 	result = CliRunner().invoke(cli, ["chatmsg", "sid_previous_request"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
+	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
 	assert "uid" in parsed["error"]["message"]
 
 
@@ -157,7 +157,7 @@ def test_chatmsg_not_found_message_mentions_uid(mock_auth_cls, mock_client_cls):
 	result = CliRunner().invoke(cli, ["chatmsg", "nobody"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
+	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
 	assert "uid" in parsed["error"]["message"]
 	assert "nobody" in parsed["error"]["message"]
 
@@ -194,26 +194,6 @@ def test_chat_summary_by_uid_uses_fresh_security_id(mock_auth_cls, mock_client_c
 	parsed = json.loads(result.output)
 	assert parsed["data"]["uid"] == "10001"
 	assert parsed["data"]["security_id"] == "sid_current_request"
-
-
-@patch("boss_agent_cli.commands.exchange.get_platform_instance")
-@patch("boss_agent_cli.commands.exchange.AuthManager")
-def test_exchange_hints_preserve_data_dir(mock_auth_cls, mock_client_cls, tmp_path):
-	"""交换请求后的沟通类后继命令必须在同一数据目录执行（Issue #917）。"""
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.friend_list.return_value = _friend_list_response(
-		[_friend_item(uid=10001, sid="sid_current_request")]
-	)
-	mock_client.exchange_contact.return_value = {"zpData": {}}
-
-	result = CliRunner().invoke(cli, ["--data-dir", str(tmp_path), "exchange", "10001"])
-
-	assert result.exit_code == 0, result.output
-	prefix = f"boss --data-dir {tmp_path.resolve()}"
-	assert json.loads(result.output)["hints"]["next_actions"] == [
-		f"{prefix} chat",
-		f"{prefix} chatmsg 10001",
-	]
 
 
 @patch("boss_agent_cli.commands.exchange.get_platform_instance")

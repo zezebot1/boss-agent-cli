@@ -6,9 +6,7 @@ This page keeps only the shortest verifiable path. See [README.en.md](../README.
 
 ```bash
 uv tool install boss-agent-cli
-# Install the browser core only when needed: boss doctor prints a runnable
-# install command when the kernel is missing
-boss doctor
+patchright install chromium
 ```
 
 Source checkout:

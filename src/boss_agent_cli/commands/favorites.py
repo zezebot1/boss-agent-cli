@@ -22,11 +22,6 @@ JOB_STATUS_INACTIVE = "inactive"
 JOB_STATUS_UNKNOWN = "unknown"
 
 
-def _hint_command(ctx: click.Context, command: str) -> str:
-	"""收藏翻页、同步与候选池查询沿用当前登录态及数据目录。"""
-	return boss_command_for_ctx(ctx, command, include_data_dir=True)
-
-
 class FavoritesPageLimitExceeded(RuntimeError):
 	"""The remote list still has more data after the bounded page budget."""
 
@@ -119,14 +114,10 @@ def collect_favorites_items(
 		if not page_items:
 			break
 
-		identities = [str(item.get("encryptJobId") or "") for item in page_items if isinstance(item, dict)]
-		# 卡片缺少 encryptJobId 时签名恒为空，无法判断是否重复页；此时继续聚合，
-		# 避免把缺字段的新页面当成重复页丢掉（终止交给 hasMore / max_pages）。
-		if any(identities):
-			signature = tuple(identities)
-			if signature in seen_signatures:
-				break
-			seen_signatures.add(signature)
+		signature = tuple(str(item.get("encryptJobId", "")) for item in page_items if isinstance(item, dict))
+		if signature in seen_signatures:
+			break
+		seen_signatures.add(signature)
 		items.extend(page_items)
 
 		if platform_data.get("hasMore") is False:
@@ -191,33 +182,20 @@ def favorites_list_cmd(ctx: click.Context, page: int) -> None:
 	status_counts = _count_job_statuses(valid_cards)
 	items = [_redact_for_display(_card_to_shortlist_item(card)) for card in valid_cards]
 
-	# 与 history / recommend 同一口径：缺失 hasMore 时为 null，不伪造成 false。
-	raw_has_more = platform_data.get("hasMore")
-	has_more = raw_has_more if isinstance(raw_has_more, bool) else None
 	pagination = {
 		"page": page,
-		"has_more": has_more,
-		"has_more_source": "platform_hasMore" if has_more is not None else "unknown",
+		"has_more": platform_data.get("hasMore", False),
 		"total": len(items),
-		"total_kind": "returned_page_count",
 		"status_counts": status_counts,
 	}
-	next_actions = [
-		_hint_command(ctx, "favorites sync"),
-		_hint_command(ctx, "--json shortlist list"),
-		_hint_command(ctx, "detail <security_id> --job-id <job_id>"),
-	]
-	operator_actions = [
-		"favorites sync 把明确有效的收藏同步到本地候选池（完整字段落库）。",
-		"终端表格不显示 security_id / job_id，需要 ID 时加 --json 读取。",
-		"httpx 快速通道只用 job_id，security_id 过期不影响取 JD。",
-	]
-	# 与 history 同一口径：hasMore 为真时才给 --page N+1，否则只会把 Agent 送进空页。
-	if has_more is True:
-		next_actions.append(_hint_command(ctx, f"favorites list --page {page + 1}"))
-	if has_more is None:
-		operator_actions.append("平台未提供可靠的下一页标记，不能仅凭本页数量判断是否还有记录")
-	hints = {"next_actions": next_actions, "operator_actions": operator_actions}
+	hints = {
+		"next_actions": [
+			f"使用 {boss_command_for_ctx(ctx, 'favorites sync')} 同步明确有效的收藏到本地候选池（完整字段落库）",
+			f"使用 {boss_command_for_ctx(ctx, '--json shortlist list')} 读取完整 security_id 与 job_id（终端表格不显示 ID，需 --json）",
+			f"使用 {boss_command_for_ctx(ctx, 'detail <security_id> --job-id <job_id>')} 查看详情（httpx 快速通道只用 job_id，sid 过期不影响取 JD）",
+			f"使用 {boss_command_for_ctx(ctx, f'favorites list --page {page + 1}')} 查看下一页",
+		],
+	}
 	handle_output(
 		ctx, "favorites-list", items,
 		render=lambda data: render_simple_list(
@@ -287,10 +265,9 @@ def favorites_sync_cmd(ctx: click.Context) -> None:
 		},
 		hints={
 			"next_actions": [
-				_hint_command(ctx, "shortlist list"),
-				_hint_command(ctx, "shortlist compare"),
-				_hint_command(ctx, "apply <security_id> <job_id>"),
-				_hint_command(ctx, "greet <security_id> <job_id>"),
+				boss_command_for_ctx(ctx, "shortlist list"),
+				boss_command_for_ctx(ctx, "shortlist compare"),
+				"使用 boss apply <security_id> <job_id> 投递，或 boss greet <security_id> <job_id> 沟通",
 			],
 		},
 	)

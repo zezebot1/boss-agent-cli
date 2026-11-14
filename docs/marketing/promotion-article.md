@@ -90,7 +90,10 @@ Agent 会自动执行 `status → search → detail → shortlist` 的低风险�
 # 安装 CLI
 uv tool install boss-agent-cli
 
-# 验证（缺浏览器内核时 doctor 会给出可直接执行的安装命令）
+# 安装浏览器引擎
+patchright install chromium
+
+# 验证
 boss doctor
 boss login
 boss search "你的目标职位"

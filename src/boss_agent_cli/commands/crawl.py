@@ -3,77 +3,32 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
-import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import click
 
-from boss_agent_cli.api.cdp_risk_lock import unlock_operator_actions, raise_if_locked
+from boss_agent_cli.api.cdp_risk_lock import UNLOCK_OPERATOR_ACTIONS, raise_if_locked
 from boss_agent_cli.api.endpoints import CITY_CODES
 from boss_agent_cli.auth.manager import AuthManager, AuthRequired
-from boss_agent_cli.cache.store import CacheRecordInvalid, CacheStore
+from boss_agent_cli.cache.store import CacheStore
 from boss_agent_cli.compliance import operating_mode, require_compliance_allowed
 from boss_agent_cli.config import DEFAULTS
 from boss_agent_cli.crawler.operations import crawl_results, crawl_status, import_crawl_shortlist
-from boss_agent_cli.crawler.service import (
-	CrawlBusyError,
-	CrawlService,
-	CrawlSettings,
-	crawl_cdp_port,
-	crawl_chrome_path,
-	crawl_int_setting,
-	unused_local_port,
-)
-from boss_agent_cli.crawler.controls import CrawlRuntimeUnavailable
-from boss_agent_cli.crawler.transport import DrissionCrawlerSession, ensure_crawl_runtime
-from boss_agent_cli.services.install_extras import extras_install_hint, extras_requirement
-from boss_agent_cli.services.json_files import write_json_atomic
+from boss_agent_cli.crawler.service import CrawlService, CrawlSettings
+from boss_agent_cli.crawler.transport import DrissionCrawlerSession
 from boss_agent_cli.display import (
-	auth_required_hints,
-	boss_command_for_ctx,
 	handle_auth_errors,
 	handle_error_output,
 	handle_output,
-	login_action_for_ctx,
 	render_action_result,
-	shell_argument,
 	render_record_result,
 )
 
 _HOOK_CHOICES = ("screenshot-full", "none")
-
-# 本地采集任务不存在时，Agent 能直接执行的下一步：新建任务、或用真实 run_id 核对。
-# 这两步都读本地状态，必须带上当前数据目录，否则会在默认目录里找同名任务。
-def _run_not_found_hints(ctx: click.Context) -> dict[str, list[str]]:
-	return {"next_actions": [
-		boss_command_for_ctx(ctx, "crawl start <query>", include_data_dir=True),
-		boss_command_for_ctx(ctx, "crawl status <run_id>", include_data_dir=True),
-	]}
-
-
-def _require_run_id(ctx: click.Context, command: str, run_id: str) -> bool:
-	"""空 run_id 是 argv 少传了值，不是「任务不存在」。
-
-	``--data-dir`` 拼错、复制命令时漏掉最后一个词都会落到这里。原样查缓存会报
-	``CRAWL_RUN_NOT_FOUND``「未找到 crawl run: 」（冒号后面什么都没有），Agent 会
-	以为任务丢了而重建；``crawl resume ""`` 更先撞上登录校验，报 ``AUTH_REQUIRED``，
-	把参数写错的人送去重新登录。
-	"""
-	if run_id.strip():
-		return True
-	handle_error_output(
-		ctx,
-		command,
-		code="INVALID_PARAM",
-		message="run_id 不能为空；先用 boss crawl status <run_id> 核对已有任务",
-		recovery_action=f"补上已有的 run_id 后重试；没有任务时先用 {boss_command_for_ctx(ctx, 'crawl start <query>', include_data_dir=True)} 新建",
-		hints=_run_not_found_hints(ctx),
-	)
-	return False
 
 
 @click.group("crawl")
@@ -97,15 +52,15 @@ def _save_crawl_config(data_dir: Path, updates: dict[str, Any]) -> dict[str, Any
 			loaded = json.loads(config_path.read_text(encoding="utf-8"))
 			if isinstance(loaded, dict):
 				user_cfg = loaded
-		except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+		except (OSError, json.JSONDecodeError):
 			pass
 	crawl_cfg = user_cfg.get("crawl", {})
 	if not isinstance(crawl_cfg, dict):
 		crawl_cfg = {}
 	crawl_cfg.update({key: value for key, value in updates.items() if value is not None})
 	user_cfg["crawl"] = crawl_cfg
-	# 原子写：写一半被中断的 config.json 会让所有命令卡在启动阶段。
-	write_json_atomic(config_path, user_cfg, trailing_newline=True)
+	config_path.parent.mkdir(parents=True, exist_ok=True)
+	config_path.write_text(json.dumps(user_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 	return crawl_cfg
 
 
@@ -139,51 +94,34 @@ def _settings_from_context(
 	chrome_path: str | None,
 	cdp_port: int | None,
 ) -> CrawlSettings:
-	# 空关键词不是「不限关键词」，而是不筛选：采集会按城市默认列表逐页抓取，
-	# 既消耗请求预算，也把任务暴露在更宽的风控面里；watch / preset 早已在写盘前拒绝。
-	if not query.strip():
-		raise ValueError("搜索关键词不能为空")
 	cfg = _crawl_config(ctx)
 	data_dir = Path(ctx.obj["data_dir"])
 	resolved_profile = str(data_dir / "crawl" / "chrome-profile")
 	resolved_hook = hook_profile or "none"
 	if resolved_hook not in _HOOK_CHOICES:
 		raise ValueError(f"unknown hook profile: {resolved_hook}")
-	resolved_chrome = crawl_chrome_path(chrome_path or cfg.get("chrome_path"))
-	resolved_port = cdp_port
-	if resolved_port is None:
-		raw_port = cfg.get("cdp_port")
-		resolved_port = unused_local_port() if raw_port is None else crawl_cdp_port(raw_port)
-	# Path.expanduser 在 ~某用户 查不到家目录时抛 RuntimeError，原来一路兜成
-	# 可重试的 NETWORK_ERROR「重试」：参数问题被说成网络问题，重试只会重复失败。
-	resolved_hook_dir: Path | None = None
-	if hook_dir:
-		try:
-			resolved_hook_dir = Path(hook_dir).expanduser()
-		except RuntimeError as exc:
-			raise ValueError(
-				f"无法展开 --hook-dir 的家目录写法：{hook_dir!r}（{exc}）；请改用绝对路径或 ~/ 开头的当前用户路径"
-			) from exc
 	return CrawlSettings(
 		query=query,
 		city_code=_city_code(city),
 		pages=pages,
 		with_detail=with_detail,
 		profile_path=Path(resolved_profile),
-		chrome_path=resolved_chrome,
-		cdp_port=resolved_port,
+		chrome_path=chrome_path or cfg.get("chrome_path"),
+		cdp_port=int(cdp_port or cfg.get("cdp_port") or _unused_local_port()),
 		hook_profile=resolved_hook,
-		hook_dir=resolved_hook_dir,
-		max_requests=crawl_int_setting(cfg, "max_requests", 20),
-		max_details=crawl_int_setting(cfg, "max_details", 50),
-		max_seconds=crawl_int_setting(cfg, "max_seconds", 600),
-		max_retries=crawl_int_setting(cfg, "max_retries", 1, minimum=0),
+		hook_dir=Path(hook_dir).expanduser() if hook_dir else None,
+		max_requests=int(cfg.get("max_requests") or 20),
+		max_details=int(cfg.get("max_details") or 50),
+		max_seconds=int(cfg.get("max_seconds") or 600),
+		max_retries=int(cfg.get("max_retries") or 1),
 		operating_mode=operating_mode(ctx),
 	)
 
 
-class _LoginSeedUnavailable(RuntimeError):
-	"""本地登录态不足以给采集浏览器播种；出口统一为 ``AUTH_REQUIRED``。"""
+def _unused_local_port() -> int:
+	with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+		connection.bind(("127.0.0.1", 0))
+		return int(connection.getsockname()[1])
 
 
 def _session_seed(ctx: click.Context) -> tuple[dict[str, str], str]:
@@ -196,13 +134,13 @@ def _session_seed(ctx: click.Context) -> tuple[dict[str, str], str]:
 	try:
 		token = auth.get_token()
 	except AuthRequired as exc:
-		raise _LoginSeedUnavailable(str(exc)) from exc
+		raise RuntimeError(str(exc)) from exc
 	raw = token.get("cookies") if isinstance(token, dict) else None
 	if not isinstance(raw, dict) or not raw:
-		raise _LoginSeedUnavailable("本地登录态缺少 Cookie，请先 boss login")
+		raise RuntimeError("本地登录态缺少 Cookie，请先 boss login")
 	cookies = {str(name): str(value) for name, value in raw.items() if name and value is not None}
 	if ctx.obj.get("platform", "zhipin") == "zhipin" and "wt2" not in cookies:
-		raise _LoginSeedUnavailable("登录态缺少 wt2，请先 boss login")
+		raise RuntimeError("登录态缺少 wt2，请先 boss login")
 	return cookies, str(token.get("user_agent") or "")
 
 
@@ -223,156 +161,57 @@ def _transport_factory(
 	)
 
 
-def _crawl_preflight(ctx: click.Context) -> tuple[dict[str, str], str]:
-	"""创建任务或启动进程之前必须成立的本地前提：可选依赖已安装、登录态可注入。
-
-	依赖先于登录态：没装 `crawl` 依赖时登录也无法采集，不应先把调用方送去登录。
-	"""
-	ensure_crawl_runtime()
-	return _session_seed(ctx)
-
-
-def _seeded_transport_factory(ctx: click.Context) -> Callable[[CrawlSettings], DrissionCrawlerSession]:
-	"""读取本地登录态并返回注入它的传输工厂；登录态不足时抛 ``_LoginSeedUnavailable``。
-
-	采集浏览器的配置目录与日常 Chrome 隔离：不注入就是登录页，采集会按未登录
-	落成 ``risk_stopped`` 并写下风险锁。所有会打开浏览器的入口都从这里取工厂。
-	"""
-	seed_cookies, user_agent = _crawl_preflight(ctx)
-	return lambda settings: _transport_factory(settings, seed_cookies=seed_cookies, user_agent=user_agent)
-
-
-def _report_corrupt_run(ctx: click.Context, command: str, run_id: str, exc: CacheRecordInvalid) -> None:
-	"""本地 run 记录写坏：断点读不出来，给「重新创建任务」指引而不是 traceback。"""
-	handle_error_output(
-		ctx,
-		command,
-		code="CACHE_RECORD_INVALID",
-		message=str(exc),
-		hints={"next_actions": [
-			boss_command_for_ctx(ctx, "crawl start <关键词>", include_data_dir=True),
-			boss_command_for_ctx(ctx, f"crawl status {shell_argument(run_id)}", include_data_dir=True),
-		]},
-	)
-
-
-def _report_login_required(ctx: click.Context, command: str, message: str) -> None:
-	handle_error_output(
-		ctx,
-		command,
-		code="AUTH_REQUIRED",
-		message=message,
-		recoverable=True,
-		recovery_action=login_action_for_ctx(ctx),
-		hints=auth_required_hints(ctx),
-	)
-
-
-def _report_crawl_runtime_missing(ctx: click.Context, command: str, message: str) -> None:
-	"""`crawl` 可选依赖缺失：恢复同一个任务只会复现，后继动作只有安装。"""
-	configure_cmd = boss_command_for_ctx(ctx, "crawl configure", include_data_dir=True)
-	handle_error_output(
-		ctx,
-		command,
-		code="CRAWL_UNAVAILABLE",
-		message=message,
-		recoverable=True,
-		recovery_action=f"安装 {extras_requirement('crawl')} 并执行 {configure_cmd}",
-		hints={"operator_actions": [
-			# uv tool install 会按给定 requirement 重建环境：已有的依赖组必须一并列出，
-			# 否则补上 crawl 的同时会丢掉 mcp（Issue #1068）。
-			"用安装本工具的同一方式补上 crawl 可选依赖："
-			f"{extras_install_hint('crawl')}；"
-			"源码仓库内为 uv sync --extra crawl",
-			"安装完成后重新执行原命令；已创建的任务可按原 run_id 恢复",
-		]},
-	)
-
-
-def _run_service(ctx: click.Context, service_call: Any, *, on_error: Callable[[str, str], None] | None = None) -> None:
-	def note(code: str, message: str) -> None:
-		# 错误出口会直接结束进程：后台 worker 要在那之前留下原因（Issue #1042）。
-		if on_error is not None:
-			on_error(code, message)
-
+def _run_service(ctx: click.Context, service_call: Any) -> None:
 	try:
 		raise_if_locked(Path(ctx.obj["data_dir"]))
-		transport_factory = _seeded_transport_factory(ctx)
+		seed_cookies, user_agent = _session_seed(ctx)
 		with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
 			service = CrawlService(
 				cache,
 				data_dir=Path(ctx.obj["data_dir"]),
-				transport_factory=transport_factory,
+				transport_factory=lambda settings: _transport_factory(
+					settings,
+					seed_cookies=seed_cookies,
+					user_agent=user_agent,
+				),
 			)
 			outcome = service_call(service)
 	except KeyError as exc:
-		handle_error_output(ctx, "crawl", code="CRAWL_RUN_NOT_FOUND", message=f"未找到 crawl run: {exc.args[0]}", hints=_run_not_found_hints(ctx))
-		return
-	except CacheRecordInvalid as exc:
-		_report_corrupt_run(ctx, "crawl", exc.record_id, exc)
-		return
-	except CrawlBusyError as exc:
-		note("CRAWL_BUSY", str(exc))
-		# 同一个 run 只能有一个执行器：另一个进程正在抓页时，本次调用没有发出任何请求。
-		# 照做 --resume 只会再撞一次，后继动作只有查看状态。
-		status_command = boss_command_for_ctx(ctx, f"crawl status {shell_argument(exc.run_id)}", include_data_dir=True)
-		handle_error_output(
-			ctx,
-			"crawl",
-			code="CRAWL_BUSY",
-			message=str(exc),
-			details={"run_id": exc.run_id},
-			recovery_action=f"用 {status_command} 查看进度，等当前执行结束后再恢复；不要并发恢复同一个 run_id",
-			hints={"next_actions": [status_command]},
-		)
+		handle_error_output(ctx, "crawl", code="JOB_NOT_FOUND", message=f"未找到 crawl run: {exc.args[0]}")
 		return
 	except ValueError as exc:
-		note("INVALID_PARAM", str(exc))
-		configure_cmd = boss_command_for_ctx(ctx, "crawl configure --help", include_data_dir=True)
-		handle_error_output(
-			ctx,
-			"crawl",
-			code="INVALID_PARAM",
-			message=str(exc),
-			recovery_action=f"按提示修正 crawl 配置后重试；可用 {configure_cmd} 查看可配置项",
-			hints={"next_actions": [configure_cmd]},
-		)
+		handle_error_output(ctx, "crawl", code="INVALID_PARAM", message=str(exc))
 		return
 	except RuntimeError as exc:
 		message = str(exc)
-		if isinstance(exc, _LoginSeedUnavailable) or "未登录" in message or "Cookie" in message or "wt2" in message:
-			note("AUTH_REQUIRED", message)
-			_report_login_required(ctx, "crawl", message)
+		if "未登录" in message or "Cookie" in message or "wt2" in message:
+			handle_error_output(
+				ctx,
+				"crawl",
+				code="AUTH_REQUIRED",
+				message=message,
+				recoverable=True,
+				recovery_action="boss login",
+			)
 			return
-		note("CRAWL_UNAVAILABLE", message)
-		if isinstance(exc, CrawlRuntimeUnavailable):
-			_report_crawl_runtime_missing(ctx, "crawl", message)
-			return
-		configure_cmd = boss_command_for_ctx(ctx, "crawl configure", include_data_dir=True)
 		handle_error_output(
 			ctx,
 			"crawl",
 			code="CRAWL_UNAVAILABLE",
 			message=message,
 			recoverable=True,
-			recovery_action=f"安装 {extras_requirement('crawl')} 并执行 {configure_cmd}",
+			recovery_action="安装 boss-agent-cli[crawl] 并执行 boss crawl configure",
 		)
 		return
-	resume_command = boss_command_for_ctx(ctx, f"crawl resume {shell_argument(outcome.run_id)}", include_data_dir=True)
 	if outcome.status == "risk_stopped":
 		hints = {"operator_actions": [
-			*unlock_operator_actions(boss_command_for_ctx(ctx, "clean --risk-lock", include_data_dir=True)),
-			f"完成人工恢复后，显式执行 {resume_command} 从原断点继续",
+			*UNLOCK_OPERATOR_ACTIONS,
+			f"完成人工恢复后，显式执行 boss crawl resume {outcome.run_id} 从原断点继续",
 		]}
 	elif outcome.status != "completed":
-		hints = {"next_actions": [resume_command]}
+		hints = {"next_actions": [f"boss crawl resume {outcome.run_id}"]}
 	else:
-		hints = {
-			# 采集跑完后 output_paths 只是落盘文件；Agent 要继续筛选得先按 run_id 读结果，
-			# 空 next_actions 会让它只能自己猜命令（crawl status 的 completed 分支同此口径）。
-			"next_actions": [boss_command_for_ctx(ctx, f"crawl results {shell_argument(outcome.run_id)}", include_data_dir=True)],
-			"operator_actions": ["查看 output_paths 中的 JSON、CSV 或 XLSX 结果文件"],
-		}
+		hints = {"next_actions": ["查看 output_paths 中的 JSON、CSV 或 XLSX 结果文件"]}
 	handle_output(
 		ctx,
 		"crawl",
@@ -380,62 +219,6 @@ def _run_service(ctx: click.Context, service_call: Any, *, on_error: Callable[[s
 		render=lambda d: render_record_result(d, title="crawl", next_steps=hints.get("next_actions", [])),
 		hints=hints,
 	)
-
-
-# worker 从被拉起到取得执行锁只需要解释器启动与一次本地读取；超过这段时间
-# 仍是 queued 且锁空闲，说明它没有活下来（Issue #1045）。
-_QUEUE_HANDOFF_GRACE_SECONDS = 30.0
-
-
-def _awaiting_queued_worker(run: dict[str, Any]) -> bool:
-	"""任务刚排队：原 worker 可能正要取锁，父进程不探测、不抢占。"""
-	if run["status"] != "queued":
-		return False
-	# 时钟回拨得到负值时按仍在窗口内处理，宁可多等也不抢。
-	return time.time() - float(run["updated_at"]) < _QUEUE_HANDOFF_GRACE_SECONDS
-
-
-def _prepare_background_resume(
-	data_dir: Path,
-	run_id: str,
-	*,
-	pages: int | None,
-	with_detail: bool,
-	clear_stop: bool,
-	preflight: Callable[[], object],
-) -> tuple[str, bool]:
-	"""返回调度状态与是否需要启动 worker；启动前交还探测用的执行锁。"""
-	with CacheStore(data_dir / "cache" / "boss_agent.db") as cache:
-		service = CrawlService(cache, data_dir=data_dir, transport_factory=_transport_factory)
-		run = cache.get_crawl_run(run_id)
-		if run is None:
-			raise KeyError(run_id)
-		if not service.has_resume_work(run, pages=pages, with_detail=with_detail):
-			return "completed", False
-		# 刚排队的任务不抢锁，以免让正准备启动的 worker 被拒绝；排队过久的
-		# 与遗留的 running 一样靠执行锁判断是否还有执行器。
-		if _awaiting_queued_worker(run):
-			return "queued", False
-		with service.execution_lock(run_id) as acquired:
-			if not acquired:
-				return "running", False
-			# running 可能来自已退出的 worker（Issue #1038）：锁空闲才
-			# 重读最新断点，不能把旧状态当作进程仍在执行的证据。
-			run = cache.get_crawl_run(run_id)
-			if run is None:
-				raise KeyError(run_id)
-			if not service.has_resume_work(run, pages=pages, with_detail=with_detail):
-				return "completed", False
-			if _awaiting_queued_worker(run):
-				return "queued", False
-			# worker 的错误信封写进空设备：依赖缺失与登录态不足要在这里由父进程报出来，
-			# 并且先于解除 stop，失败的调用不改动任务（Issue #1042）。
-			preflight()
-			if clear_stop:
-				# 父进程解除旧 stop；worker 保留 --from-queue，不能清除
-				# 启动期间新收到的停止请求（Issue #1036）。
-				cache.clear_crawl_stop_request(run_id)
-		return "queued", True
 
 
 def _launch_background_resume(
@@ -472,48 +255,6 @@ def _launch_background_resume(
 	)
 
 
-_UNSETTLED_STATUSES = ("queued", "running")
-
-
-def _settle_unstarted_worker(data_dir: Path, run_id: str, detail: str) -> None:
-	"""后台 worker 退出时任务仍显示排队或运行中：没有执行器了，把原因写回（Issue #1042）。
-
-	worker 的信封写进空设备；不写回的话任务永远停在 ``queued``、没有错误，
-	而后台恢复又把 ``queued`` 当作「原 worker 即将接手」，不会再启动。恢复遗留
-	``running`` 的 worker 没能接手时同理。执行器写下的终态（含 ``stopped``）不改：
-	那是上一次真实执行的结果。
-	"""
-	reason = (
-		f"后台任务未能开始执行（{detail}）"
-		if detail
-		else "后台任务未能开始执行；在前台执行 crawl resume 可查看具体原因"
-	)
-	try:
-		with CacheStore(data_dir / "cache" / "boss_agent.db") as cache:
-			run = cache.get_crawl_run(run_id)
-			if run is None or run["status"] not in _UNSETTLED_STATUSES:
-				return
-			service = CrawlService(cache, data_dir=data_dir, transport_factory=_transport_factory)
-			with service.execution_lock(run_id) as acquired:
-				if not acquired:
-					# 另一个执行器已取得执行权，任务由它负责。
-					return
-				# 执行器全程持锁并在放锁前写终态：锁空闲而状态仍未结束，说明无人执行。
-				run = cache.get_crawl_run(run_id)
-				if run is None or run["status"] not in _UNSETTLED_STATUSES:
-					return
-				cache.update_crawl_run(
-					run_id,
-					status="stopped",
-					next_page=int(run["next_page"]),
-					error=reason,
-					list_finished=bool(run["list_finished"]),
-				)
-	except Exception:
-		# 写回失败不能盖住 worker 原本的退出原因。
-		return
-
-
 @crawl_group.command("configure")
 @click.option("--chrome-path", default=None, type=click.Path(path_type=Path), help="chrome.exe 路径")
 @click.option("--port", "cdp_port", default=None, type=click.IntRange(1, 65535), help="Chrome 远程调试端口")
@@ -533,15 +274,7 @@ def configure_cmd(
 ) -> None:
 	"""设置 crawl 专用 Chrome 和 Hook 配置。"""
 	if all(value is None for value in (chrome_path, cdp_port, max_requests, max_details, max_seconds, max_retries)):
-		configure_help = boss_command_for_ctx(ctx, "crawl configure --help", include_data_dir=True)
-		handle_error_output(
-			ctx,
-			"crawl.configure",
-			code="INVALID_PARAM",
-			message="至少提供一个 crawl 配置项",
-			recovery_action=f"补上要调整的配置项后重试；可用 {configure_help} 查看可配置项",
-			hints={"next_actions": [configure_help]},
-		)
+		handle_error_output(ctx, "crawl.configure", code="INVALID_PARAM", message="至少提供一个 crawl 配置项")
 		return
 	updates = {
 		"chrome_path": str(chrome_path) if chrome_path is not None else None,
@@ -552,15 +285,11 @@ def configure_cmd(
 		"max_retries": max_retries,
 	}
 	configured = _save_crawl_config(Path(ctx.obj["data_dir"]), updates)
-	# 配置写在当前数据目录；后继的 crawl run 必须用同一目录，否则新预算与
-	# Chrome 设置不会生效，断点与产物也落进默认目录。
-	run_command = boss_command_for_ctx(ctx, "crawl run <关键词> --city <城市>", include_data_dir=True)
 	handle_output(
 		ctx,
 		"crawl.configure",
 		{"crawl": configured},
-		render=lambda d: render_record_result(d, title="crawl configure", next_steps=[run_command]),
-		hints={"next_actions": [run_command]},
+		render=lambda d: render_record_result(d, title="crawl configure", next_steps=["boss crawl run <关键词> --city <城市>"]),
 	)
 
 
@@ -569,7 +298,7 @@ def configure_cmd(
 @click.option("--city", required=True, help="城市名称或数字城市代码")
 @click.option("--pages", default=5, type=click.IntRange(1), show_default=True, help="严格页数上限")
 @click.option("--with-detail", is_flag=True, default=False, help="串行补全所有职位的 job_card")
-@click.option("--hook-profile", type=click.Choice(_HOOK_CHOICES), default=None, help="页面 Hook 配置：none（默认，不注入脚本）/ screenshot-full（注入用户授权脚本，需同时给 --hook-dir）")
+@click.option("--hook-profile", type=click.Choice(_HOOK_CHOICES), default=None)
 @click.option(
 	"--hook-dir", type=click.Path(path_type=Path), default=None, help="与 screenshot-full 一起显式指定的用户脚本目录"
 )
@@ -607,15 +336,7 @@ def run_cmd(
 			cdp_port=cdp_port,
 		)
 	except ValueError as exc:
-		configure_cmd = boss_command_for_ctx(ctx, "crawl configure --help", include_data_dir=True)
-		handle_error_output(
-			ctx,
-			"crawl",
-			code="INVALID_PARAM",
-			message=str(exc),
-			recovery_action=f"按提示修正关键词、城市或 Hook 配置后重试；可用 {configure_cmd} 查看可配置项",
-			hints={"next_actions": [configure_cmd]},
-		)
+		handle_error_output(ctx, "crawl", code="INVALID_PARAM", message=str(exc))
 		return
 	_run_service(ctx, lambda service: service.create_and_run(settings))
 
@@ -625,7 +346,7 @@ def run_cmd(
 @click.option("--city", required=True, help="城市名称或数字城市代码")
 @click.option("--pages", default=5, type=click.IntRange(1), show_default=True, help="严格页数上限")
 @click.option("--with-detail", is_flag=True, default=False, help="串行补全所有职位的 job_card")
-@click.option("--hook-profile", type=click.Choice(_HOOK_CHOICES), default=None, help="页面 Hook 配置：none（默认，不注入脚本）/ screenshot-full（注入用户授权脚本，需同时给 --hook-dir）")
+@click.option("--hook-profile", type=click.Choice(_HOOK_CHOICES), default=None)
 @click.option(
 	"--hook-dir", type=click.Path(path_type=Path), default=None, help="与 screenshot-full 一起显式指定的用户脚本目录"
 )
@@ -659,38 +380,17 @@ def start_cmd(
 			chrome_path=None,
 			cdp_port=None,
 		)
-		# worker 的错误信封写进空设备：依赖缺失与登录态不足必须在创建任务之前由
-		# 父进程报出来，否则留下一个没人能执行的任务（Issue #1042、#1050）。
-		_crawl_preflight(ctx)
 		with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
 			service = CrawlService(cache, data_dir=Path(ctx.obj["data_dir"]), transport_factory=_transport_factory)
 			run_id = service.create(settings)
 		_launch_background_resume(Path(ctx.obj["data_dir"]), run_id)
-	except _LoginSeedUnavailable as exc:
-		_report_login_required(ctx, "crawl.start", str(exc))
-		return
-	except CrawlRuntimeUnavailable as exc:
-		_report_crawl_runtime_missing(ctx, "crawl.start", str(exc))
-		return
 	except ValueError as exc:
-		configure_cmd = boss_command_for_ctx(ctx, "crawl configure --help", include_data_dir=True)
-		handle_error_output(
-			ctx,
-			"crawl.start",
-			code="INVALID_PARAM",
-			message=str(exc),
-			recovery_action=f"按提示修正关键词、城市或 Hook 配置后重试；可用 {configure_cmd} 查看可配置项",
-			hints={"next_actions": [configure_cmd]},
-		)
+		handle_error_output(ctx, "crawl.start", code="INVALID_PARAM", message=str(exc))
 		return
 	except OSError as exc:
 		if run_id is not None:
 			with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
-				try:
-					run = cache.get_crawl_run(run_id)
-				except CacheRecordInvalid:
-					# 记录已损坏时无法回写状态：下面仍按启动失败回报，重建任务即可。
-					run = None
+				run = cache.get_crawl_run(run_id)
 				if run is not None:
 					cache.update_crawl_run(
 						run_id,
@@ -699,30 +399,15 @@ def start_cmd(
 						error=f"无法启动后台任务: {exc}",
 						list_finished=bool(run["list_finished"]),
 					)
-		# operating_mode 在新版本不再限制能力，指引应指向真正的启动失败原因。
-		resume_command = boss_command_for_ctx(ctx, f"crawl resume {shell_argument(run_id)}", include_data_dir=True) if run_id is not None else None
-		recovery_action = (
-			f"检查磁盘空间与数据目录权限后执行 {resume_command} 重试"
-			if resume_command is not None
-			else "检查磁盘空间与数据目录权限后重新执行 boss crawl start"
-		)
 		handle_error_output(
 			ctx,
 			"crawl.start",
 			code="CRAWL_UNAVAILABLE",
 			message=f"无法启动 crawl 后台任务: {exc}",
 			recoverable=True,
-			recovery_action=recovery_action,
+			recovery_action="设置 operating_mode=research 后执行 boss crawl resume <run_id> 重试",
 		)
 		return
-	# 终端里看到的下一步必须与信封 hints 同口径：此前终端只提示 stop、
-	# 信封只提示 results，真人不知道去哪里看结果，Agent 不知道可以中止。
-	next_steps = [
-		boss_command_for_ctx(ctx, f"crawl status {shell_argument(run_id)}", include_data_dir=True),
-		boss_command_for_ctx(ctx, f"crawl results {shell_argument(run_id)}", include_data_dir=True),
-		boss_command_for_ctx(ctx, f"crawl stop {shell_argument(run_id)}", include_data_dir=True),
-	]
-	resume_command = boss_command_for_ctx(ctx, f"crawl resume {shell_argument(run_id)}", include_data_dir=True)
 	handle_output(
 		ctx,
 		"crawl.start",
@@ -730,10 +415,12 @@ def start_cmd(
 			"run_id": run_id,
 			"status": "queued",
 			"background": True,
-			"checkpoint": {"resume_command": resume_command},
+			"checkpoint": {"resume_command": f"boss crawl resume {run_id}"},
 		},
-		render=lambda d: render_record_result(d, title="crawl start", next_steps=next_steps),
-		hints={"next_actions": next_steps},
+		render=lambda d: render_record_result(
+			d, title="crawl start", next_steps=[f"boss crawl status {run_id}", f"boss crawl stop {run_id}"]
+		),
+		hints={"next_actions": [f"boss crawl status {run_id}", f"boss crawl results {run_id}"]},
 	)
 
 
@@ -754,112 +441,44 @@ def resume_cmd(
 	from_queue: bool,
 ) -> None:
 	"""从已保存的页游标和详情队列恢复采集。"""
-	failures: list[tuple[str, str]] = []
-	try:
-		_resume(
-			ctx, run_id, pages, with_detail, background, from_queue,
-			on_error=lambda code, message: failures.append((code, message)),
-		)
-	except Exception as exc:
-		# 由外层装饰器出信封的异常（风险锁等）只留稳定错误码，不留平台原文。
-		failures.append((str(getattr(exc, "code", "") or type(exc).__name__), ""))
-		raise
-	finally:
-		code, message = failures[-1] if failures else ("", "")
-		# 被另一个执行器拒绝时任务归它负责：即使它随后放锁，也不把它的任务记成本次未接手。
-		if from_queue and not background and code != "CRAWL_BUSY":
-			_settle_unstarted_worker(
-				Path(ctx.obj["data_dir"]), run_id, f"{code}: {message}" if message else code
-			)
-
-
-def _resume(
-	ctx: click.Context,
-	run_id: str,
-	pages: int | None,
-	with_detail: bool,
-	background: bool,
-	from_queue: bool,
-	*,
-	on_error: Callable[[str, str], None],
-) -> None:
-	if not _require_run_id(ctx, "crawl.resume", run_id):
-		ctx.exit(1)
-		return
 	if not _require_crawl_capabilities(ctx):
 		ctx.exit(1)
 		return
 	raise_if_locked(Path(ctx.obj["data_dir"]))
-	# run 记录只存在本地缓存：ID 写错时要在要求登录之前报出来，否则调用方
-	# 会先被送去 `boss login`，登录回来才发现任务根本不存在（与空 run_id 同类）。
-	try:
-		with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
-			run_exists = cache.get_crawl_run(run_id) is not None
-	except CacheRecordInvalid as exc:
-		_report_corrupt_run(ctx, "crawl.resume", run_id, exc)
-		return
-	if not run_exists:
-		handle_error_output(
-			ctx, "crawl.resume", code="CRAWL_RUN_NOT_FOUND", message=f"未找到 crawl run: {run_id}", hints=_run_not_found_hints(ctx)
-		)
-		return
 	if background:
 		try:
-			status, should_launch = _prepare_background_resume(
-				Path(ctx.obj["data_dir"]), run_id,
-				pages=pages, with_detail=with_detail, clear_stop=not from_queue,
-				preflight=lambda: _crawl_preflight(ctx),
-			)
-		except _LoginSeedUnavailable as exc:
-			_report_login_required(ctx, "crawl.resume", str(exc))
-			return
-		except CrawlRuntimeUnavailable as exc:
-			_report_crawl_runtime_missing(ctx, "crawl.resume", str(exc))
-			return
-		except KeyError:
-			handle_error_output(ctx, "crawl.resume", code="CRAWL_RUN_NOT_FOUND", message=f"未找到 crawl run: {run_id}", hints=_run_not_found_hints(ctx))
-			return
-		except CacheRecordInvalid as exc:
-			_report_corrupt_run(ctx, "crawl.resume", run_id, exc)
-			return
-		if should_launch:
-			# 先释放探测锁再启动，worker 会自行取得执行权并重读断点。
-			try:
+			with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
+				run = cache.get_crawl_run(run_id)
+				if run is None:
+					raise KeyError(run_id)
+				status = str(run["status"])
+			should_launch = status not in {"queued", "running"}
+			if should_launch:
 				_launch_background_resume(
 					Path(ctx.obj["data_dir"]),
 					run_id,
 					pages=pages,
 					with_detail=with_detail,
 				)
-			except OSError as exc:
-				resume_command = boss_command_for_ctx(ctx, f"crawl resume {shell_argument(run_id)}", include_data_dir=True)
-				handle_error_output(
-					ctx,
-					"crawl.resume",
-					code="CRAWL_UNAVAILABLE",
-					message=f"无法启动 crawl 后台任务: {exc}",
-					recoverable=True,
-					recovery_action=f"检查磁盘空间与数据目录权限后执行 {resume_command} 重试",
-				)
-				return
-		if status == "completed":
-			# 拉起一个没有工作的后台进程只会让它立即退出，却让调用方以为任务重新排队。
-			results_command = boss_command_for_ctx(ctx, f"crawl results {shell_argument(run_id)}", include_data_dir=True)
-			handle_output(
+		except KeyError:
+			handle_error_output(ctx, "crawl.resume", code="JOB_NOT_FOUND", message=f"未找到 crawl run: {run_id}")
+			return
+		except OSError as exc:
+			handle_error_output(
 				ctx,
 				"crawl.resume",
-				{"run_id": run_id, "status": "completed", "background": True},
-				render=lambda d: render_action_result(d, title="crawl resume", next_steps=[results_command]),
-				hints={"next_actions": [results_command]},
+				code="CRAWL_UNAVAILABLE",
+				message=f"无法启动 crawl 后台任务: {exc}",
+				recoverable=True,
+				recovery_action=f"执行 boss crawl resume {run_id} 重试",
 			)
 			return
-		status_command = boss_command_for_ctx(ctx, f"crawl status {shell_argument(run_id)}", include_data_dir=True)
 		handle_output(
 			ctx,
 			"crawl.resume",
-			{"run_id": run_id, "status": status, "background": True},
-			render=lambda d: render_action_result(d, title="crawl resume", next_steps=[status_command]),
-			hints={"next_actions": [status_command]},
+			{"run_id": run_id, "status": status if status in {"queued", "running"} else "queued", "background": True},
+			render=lambda d: render_action_result(d, title="crawl resume", next_steps=[f"boss crawl status {run_id}"]),
+			hints={"next_actions": [f"boss crawl status {run_id}"]},
 		)
 		return
 	_run_service(
@@ -871,7 +490,6 @@ def _resume(
 			operating_mode=operating_mode(ctx),
 			clear_stop=not from_queue,
 		),
-		on_error=on_error,
 	)
 
 
@@ -880,52 +498,19 @@ def _resume(
 @click.pass_context
 def status_cmd(ctx: click.Context, run_id: str) -> None:
 	"""读取 crawl 任务状态，不打开浏览器。"""
-	if not _require_run_id(ctx, "crawl.status", run_id):
-		return
 	try:
 		with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
-			payload = crawl_status(cache, run_id, data_dir=ctx.obj["data_dir"])
-			run = cache.get_crawl_run(run_id)
-			queue_overdue = run is not None and run["status"] == "queued" and not _awaiting_queued_worker(run)
+			payload = crawl_status(cache, run_id)
 	except KeyError:
-		handle_error_output(ctx, "crawl.status", code="CRAWL_RUN_NOT_FOUND", message=f"未找到 crawl run: {run_id}", hints=_run_not_found_hints(ctx))
+		handle_error_output(ctx, "crawl.status", code="JOB_NOT_FOUND", message=f"未找到 crawl run: {run_id}")
 		return
-	except CacheRecordInvalid as exc:
-		_report_corrupt_run(ctx, "crawl.status", run_id, exc)
-		return
-	hints: dict[str, list[str]] | None = None
-	# TTY 的下一步与信封 hints 必须同一口径：只有还在跑的 run 才值得提示 stop，
-	# 已结束的 run 上 `crawl stop` 仍会返回 stop_requested，但什么都不会停。
-	next_steps = [boss_command_for_ctx(ctx, f"crawl results {shell_argument(run_id)}", include_data_dir=True)]
-	if payload["status"] in ("queued", "running"):
-		next_steps.append(boss_command_for_ctx(ctx, f"crawl stop {shell_argument(run_id)}", include_data_dir=True))
-	if queue_overdue:
-		# 排队过久多半是后台进程没活下来：只轮询 status 永远等不到结果。后台恢复
-		# 会先探测执行锁，仍有执行器时只回报 running，不会重复启动（Issue #1045）。
-		next_steps.append(
-			boss_command_for_ctx(ctx, f"crawl resume {shell_argument(run_id)} --background", include_data_dir=True)
-		)
-	if payload["status"] == "risk_stopped":
-		# 风险锁会先于浏览器构造阻断 resume：直接照 checkpoint.resume_command
-		# 重试只会再次撞锁。解锁必须由用户确认官方页面恢复后显式执行。
-		hints = {
-			"operator_actions": [
-				*unlock_operator_actions(boss_command_for_ctx(ctx, "clean --risk-lock", include_data_dir=True)),
-				f"完成人工恢复后，显式执行 {payload['checkpoint']['resume_command']} 从原断点继续",
-			],
-		}
-	else:
-		hints = {"next_actions": next_steps}
 	handle_output(
 		ctx,
 		"crawl.status",
 		payload,
 		render=lambda d: render_record_result(
-			d,
-			title="crawl status",
-			next_steps=next_steps,
+			d, title="crawl status", next_steps=[f"boss crawl results {run_id}", f"boss crawl stop {run_id}"]
 		),
-		hints=hints,
 	)
 
 
@@ -934,19 +519,15 @@ def status_cmd(ctx: click.Context, run_id: str) -> None:
 @click.pass_context
 def stop_cmd(ctx: click.Context, run_id: str) -> None:
 	"""请求运行中的 crawl 在下一安全点停止并保留 checkpoint。"""
-	if not _require_run_id(ctx, "crawl.stop", run_id):
-		return
 	with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
 		if not cache.request_crawl_stop(run_id):
-			handle_error_output(ctx, "crawl.stop", code="CRAWL_RUN_NOT_FOUND", message=f"未找到 crawl run: {run_id}", hints=_run_not_found_hints(ctx))
+			handle_error_output(ctx, "crawl.stop", code="JOB_NOT_FOUND", message=f"未找到 crawl run: {run_id}")
 			return
-	status_command = boss_command_for_ctx(ctx, f"crawl status {shell_argument(run_id)}", include_data_dir=True)
 	handle_output(
 		ctx,
 		"crawl.stop",
 		{"run_id": run_id, "status": "stop_requested"},
-		render=lambda d: render_action_result(d, title="crawl stop", next_steps=[status_command]),
-		hints={"next_actions": [status_command]},
+		render=lambda d: render_action_result(d, title="crawl stop", next_steps=[f"boss crawl status {run_id}"]),
 	)
 
 
@@ -957,33 +538,17 @@ def stop_cmd(ctx: click.Context, run_id: str) -> None:
 @click.pass_context
 def results_cmd(ctx: click.Context, run_id: str, page: int | None, detail_status: str | None) -> None:
 	"""读取 crawl 已采集结果，不打开浏览器。"""
-	if not _require_run_id(ctx, "crawl.results", run_id):
-		return
 	try:
 		with CacheStore(ctx.obj["data_dir"] / "cache" / "boss_agent.db") as cache:
 			payload = crawl_results(cache, run_id, page=page, detail_status=detail_status)
 	except KeyError:
-		handle_error_output(ctx, "crawl.results", code="CRAWL_RUN_NOT_FOUND", message=f"未找到 crawl run: {run_id}", hints=_run_not_found_hints(ctx))
+		handle_error_output(ctx, "crawl.results", code="JOB_NOT_FOUND", message=f"未找到 crawl run: {run_id}")
 		return
-	except CacheRecordInvalid as exc:
-		_report_corrupt_run(ctx, "crawl.results", run_id, exc)
-		return
-	# 后继导入必须明确选择范围：缺少 --selector / --all 会被 shortlist 拒绝。
-	# 使用本次实际返回的 selector，保留页码和详情状态筛选的结果范围。
-	argv = ["crawl"]
-	if payload["jobs"]:
-		argv.extend(["shortlist", run_id])
-		for job in payload["jobs"]:
-			argv.extend(["--selector", str(job["selector"])])
-	else:
-		argv.extend(["status", run_id])
-	next_steps = [boss_command_for_ctx(ctx, " ".join(shell_argument(part) for part in argv), include_data_dir=True)]
 	handle_output(
 		ctx,
 		"crawl.results",
 		payload,
-		render=lambda d: render_record_result(d, title="crawl results", next_steps=next_steps),
-		hints={"next_actions": next_steps},
+		render=lambda d: render_record_result(d, title="crawl results", next_steps=[f"boss crawl shortlist {run_id}"]),
 	)
 
 
@@ -1004,14 +569,11 @@ def shortlist_cmd(
 ) -> None:
 	"""将 crawl 结果导入原项目的本地职位候选池。"""
 	if include_all == bool(selectors):
-		results_cmd = boss_command_for_ctx(ctx, f"crawl results {shell_argument(run_id)}", include_data_dir=True)
 		handle_error_output(
 			ctx,
 			"crawl.shortlist",
 			code="INVALID_PARAM",
 			message="必须且只能使用 --all 或至少一个 --selector 选择要导入的职位",
-			recovery_action=f"用 --all 导入该 run 的全部结果，或改用至少一个 --selector 指定要导入的职位；候选 selector 可用 {results_cmd} 查看",
-			hints={"next_actions": [results_cmd]},
 		)
 		return
 
@@ -1026,33 +588,21 @@ def shortlist_cmd(
 				note=note,
 			)
 	except KeyError:
-		handle_error_output(ctx, "crawl.shortlist", code="CRAWL_RUN_NOT_FOUND", message=f"未找到 crawl run: {run_id}", hints=_run_not_found_hints(ctx))
-		return
-	except CacheRecordInvalid as exc:
-		_report_corrupt_run(ctx, "crawl.shortlist", run_id, exc)
+		handle_error_output(ctx, "crawl.shortlist", code="JOB_NOT_FOUND", message=f"未找到 crawl run: {run_id}")
 		return
 	except ValueError as exc:
-		results_cmd = boss_command_for_ctx(ctx, f"crawl results {shell_argument(run_id)}", include_data_dir=True)
-		handle_error_output(
-			ctx,
-			"crawl.shortlist",
-			code="INVALID_PARAM",
-			message=str(exc),
-			recovery_action=f"用 {results_cmd} 核对可用 selector 后重试，或改用 --all 导入该 run 的全部结果",
-			hints={"next_actions": [results_cmd]},
-		)
+		handle_error_output(ctx, "crawl.shortlist", code="INVALID_PARAM", message=str(exc))
 		return
 
-	list_command = boss_command_for_ctx(ctx, "shortlist list", include_data_dir=True)
 	handle_output(
 		ctx,
 		"crawl.shortlist",
 		payload,
-		render=lambda d: render_record_result(d, title="crawl shortlist", next_steps=[list_command]),
+		render=lambda d: render_record_result(d, title="crawl shortlist", next_steps=["boss shortlist list"]),
 		hints={
 			"next_actions": [
-				list_command,
-				boss_command_for_ctx(ctx, "ai fit --resume <简历名> --limit 20", include_data_dir=True),
+				"boss shortlist list",
+				"boss ai fit --resume <简历名> --limit 20",
 			],
 		},
 	)

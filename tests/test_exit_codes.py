@@ -21,7 +21,7 @@ def _reset_exit_codes_mode():
 
 def test_mapping_only_uses_registered_codes_and_sysexits_values():
 	assert set(output.SYSEXITS_EXIT_CODES) <= set(ERROR_CODES)
-	assert set(output.SYSEXITS_EXIT_CODES.values()) <= {69, 70, 75, 77, 78}
+	assert set(output.SYSEXITS_EXIT_CODES.values()) <= {69, 75, 77, 78}
 
 
 @pytest.mark.parametrize(
@@ -36,17 +36,13 @@ def test_mapping_only_uses_registered_codes_and_sysexits_values():
 		("RATE_LIMITED", 75),
 		("REQUEST_BUDGET_EXHAUSTED", 75),
 		("LOGIN_TIMEOUT", 75),
-		("BROWSER_NAV_TIMEOUT", 75),
 		("WORKFLOW_TIMEOUT", 75),
-		("WORKFLOW_BUSY", 75),
-		("CRAWL_BUSY", 75),
 		("ACCOUNT_RISK", 69),
 		("ENVIRONMENT_RISK", 69),
 		("ENVIRONMENT_RISK_LOCKED", 69),
 		("LOGIN_RISK_CONTROL", 69),
 		("NOT_SUPPORTED", 69),
 		("PLATFORM_NOT_SUPPORTED", 69),
-		("INTERNAL_ERROR", 70),
 		("JOB_NOT_FOUND", 1),
 		("UNKNOWN_CODE", 1),
 		("", 1),

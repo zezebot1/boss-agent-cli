@@ -4,7 +4,6 @@
 而非 test_shortlist.py 的纯本地模式——favorites 需要调 platform.job_favorites。
 """
 import json
-import shlex
 from unittest.mock import patch
 
 import pytest
@@ -133,123 +132,6 @@ def test_favorites_list_hints_avoid_detail_with_redacted_sid(mock_auth_cls, mock
 	# 不得有"裸 detail <security_id>"（无 --job-id）的整条，锁死不退回误导版
 	import re
 	assert not any(re.search(r"detail <security_id>(?! --job-id)", a) for a in next_actions)
-
-
-@patch("boss_agent_cli.commands.favorites.get_platform_instance")
-@patch("boss_agent_cli.commands.favorites.AuthManager")
-def test_favorites_list_hints_omit_next_page_when_no_more(mock_auth_cls, mock_platform_cls):
-	"""hasMore=false 时不能建议 --page N+1：Agent 照着执行只会拿到空页。"""
-	platform = _ctx_mock(mock_platform_cls)
-	platform.job_favorites.return_value = {
-		"code": 0,
-		"zpData": {"cardList": [_make_card()], "hasMore": False},
-	}
-	result = CliRunner().invoke(cli, ["--json", "favorites", "list", "--page", "3"])
-	assert result.exit_code == 0
-	next_actions = json.loads(result.output)["hints"]["next_actions"]
-	assert all("--page" not in action for action in next_actions)
-
-
-@patch("boss_agent_cli.commands.favorites.get_platform_instance")
-@patch("boss_agent_cli.commands.favorites.AuthManager")
-def test_favorites_list_hints_include_next_page_when_has_more(mock_auth_cls, mock_platform_cls):
-	"""hasMore=true 时保留下一页提示，页码基于当前页 +1。"""
-	platform = _ctx_mock(mock_platform_cls)
-	platform.job_favorites.return_value = {
-		"code": 0,
-		"zpData": {"cardList": [_make_card()], "hasMore": True},
-	}
-	result = CliRunner().invoke(cli, ["--json", "favorites", "list", "--page", "2"])
-	assert result.exit_code == 0
-	next_actions = json.loads(result.output)["hints"]["next_actions"]
-	assert any("favorites list --page 3" in action for action in next_actions)
-
-
-@pytest.mark.parametrize(
-	("platform_has_more", "expected"),
-	[(True, True), (False, False), ("missing", None)],
-)
-@patch("boss_agent_cli.commands.favorites.get_platform_instance")
-@patch("boss_agent_cli.commands.favorites.AuthManager")
-def test_favorites_list_pagination_reports_platform_evidence(
-	mock_auth_cls, mock_platform_cls, platform_has_more, expected, tmp_path,
-):
-	"""缺失 hasMore 时返回 null，不能伪造成 false；三态都必须记录来源。"""
-	platform = _ctx_mock(mock_platform_cls)
-	zp_data = {"cardList": [_make_card()]}
-	if platform_has_more != "missing":
-		zp_data["hasMore"] = platform_has_more
-	platform.job_favorites.return_value = {"code": 0, "zpData": zp_data}
-	result = CliRunner().invoke(cli, ["--data-dir", str(tmp_path), "--json", "favorites", "list", "--page", "2"])
-	assert result.exit_code == 0
-	parsed = json.loads(result.output)
-	pagination = parsed["pagination"]
-	assert pagination["page"] == 2
-	assert pagination["has_more"] is expected
-	assert pagination["has_more_source"] == ("platform_hasMore" if expected is not None else "unknown")
-	assert pagination["total"] == 1
-	assert pagination["total_kind"] == "returned_page_count"
-	next_pages = [action for action in parsed["hints"]["next_actions"] if "favorites list --page" in action]
-	operator_actions = parsed["hints"]["operator_actions"]
-	if expected is True:
-		assert [shlex.split(action) for action in next_pages] == [
-			["boss", "--data-dir", str(tmp_path.resolve()), "favorites", "list", "--page", "3"],
-		]
-		assert len(operator_actions) == 3
-	elif expected is False:
-		assert next_pages == []
-		assert len(operator_actions) == 3
-	else:
-		assert next_pages == []
-		assert operator_actions[-1] == "平台未提供可靠的下一页标记，不能仅凭本页数量判断是否还有记录"
-		assert len(operator_actions) == 4
-
-
-@patch("boss_agent_cli.commands.favorites.get_platform_instance")
-@patch("boss_agent_cli.commands.favorites.AuthManager")
-def test_favorites_hints_replay_pagination_sync_and_shortlist(mock_auth_cls, mock_platform_cls, tmp_path):
-	"""预览脱敏，后继指引必须用原目录的账号翻页、同步，再从同一候选池取完整标识。"""
-	data_dir = tmp_path / "jobs [x] team's"
-	platform = _ctx_mock(mock_platform_cls)
-	platform.job_favorites.side_effect = [
-		{"code": 0, "zpData": {"cardList": [_make_card()], "hasMore": True}},
-		{"code": 0, "zpData": {"cardList": [], "hasMore": False}},
-		{"code": 0, "zpData": {"cardList": [_make_card()], "hasMore": False}},
-	]
-	runner = CliRunner()
-	preview = runner.invoke(cli, ["--data-dir", str(data_dir), "--json", "favorites", "list", "--page", "2"])
-	assert preview.exit_code == 0, preview.output
-	payload = json.loads(preview.stdout)
-	assert payload["data"][0]["security_id"] == "[REDACTED]"
-	assert payload["data"][0]["job_id"] == "[REDACTED]"
-	actions = payload["hints"]["next_actions"]
-	for action in actions:
-		assert shlex.split(action)[:3] == ["boss", "--data-dir", str(data_dir.resolve())]
-	next_page_hint = next(action for action in actions if "--page" in action)
-	assert shlex.split(next_page_hint)[-2:] == ["--page", "3"]
-	next_page = runner.invoke(cli, ["--json", *shlex.split(next_page_hint)[1:]])
-	assert next_page.exit_code == 0, next_page.output
-
-	sync_hint = next(action for action in actions if action.endswith("favorites sync"))
-	synced = runner.invoke(cli, ["--json", *shlex.split(sync_hint)[1:]])
-	assert synced.exit_code == 0, synced.output
-	payload = json.loads(synced.stdout)
-	assert payload["data"]["imported_count"] == 1
-	for action in payload["hints"]["next_actions"]:
-		assert shlex.split(action)[:3] == ["boss", "--data-dir", str(data_dir.resolve())]
-
-	# 预览给出的 --json shortlist list 直接重放就能读到完整标识。
-	list_hint = next(action for action in actions if "--json shortlist list" in action)
-	listed = runner.invoke(cli, shlex.split(list_hint)[1:])
-	assert listed.exit_code == 0, listed.output
-	item = json.loads(listed.stdout)["data"][0]
-	assert (item["security_id"], item["job_id"]) == ("sec_test1", "job_test1")
-	compare_hint = next(action for action in payload["hints"]["next_actions"] if action.endswith("shortlist compare"))
-	compared = runner.invoke(cli, ["--json", *shlex.split(compare_hint)[1:]])
-	assert compared.exit_code == 0, compared.output
-	assert json.loads(compared.stdout)["data"]["count"] == 1
-	assert [call.kwargs["page"] for call in platform.job_favorites.call_args_list] == [2, 3, 1]
-	assert [call.args[0].resolve() for call in mock_auth_cls.call_args_list] == [data_dir.resolve()] * 3
 
 
 # ── sync ──────────────────────────────────────────────────────────
@@ -500,27 +382,6 @@ def test_favorites_sync_null_identifiers_are_skipped(mock_auth_cls, mock_platfor
 		"unknown_count": 0,
 	}
 	assert _shortlist_items(tmp_path) == []
-
-
-def test_collect_favorites_keeps_second_page_when_cards_lack_encrypt_job_id():
-	"""卡片刻意缺少 encryptJobId 时签名恒为空，不能把第二页当成重复页丢掉。"""
-	from unittest.mock import MagicMock
-
-	from boss_agent_cli.commands.favorites import collect_favorites_items
-
-	platform = MagicMock()
-	platform.is_success.return_value = True
-	platform.unwrap_data.side_effect = lambda response: response["zpData"]
-	platform.job_favorites.side_effect = [
-		{"code": 0, "zpData": {"cardList": [_make_card(jid="job_1", drop=("encryptJobId",))], "hasMore": True}},
-		{"code": 0, "zpData": {"cardList": [_make_card(jid="job_2", drop=("encryptJobId",))], "hasMore": False}},
-	]
-
-	items, error = collect_favorites_items(platform)
-
-	assert error is None
-	assert len(items) == 2
-	assert platform.job_favorites.call_count == 2
 
 
 def test_collect_favorites_rejects_incomplete_page_budget():

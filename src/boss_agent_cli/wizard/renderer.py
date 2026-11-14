@@ -57,81 +57,31 @@ ERROR_LABELS = {
 	"AUTH_REQUIRED": "当前平台尚未登录",
 	"TOKEN_REFRESH_FAILED": "登录状态已过期",
 	"NETWORK_ERROR": "网络请求失败",
-	"INTERNAL_ERROR": "程序内部出错",
-	"BROWSER_NAV_TIMEOUT": "浏览器首页加载超时",
-	"BROWSER_KERNEL_MISSING": "浏览器内核缺失或版本不匹配",
 	"RATE_LIMITED": "请求过于频繁",
 	"ACCOUNT_RISK": "平台已暂停本次操作",
 	"ENVIRONMENT_RISK": "平台判定当前访问环境异常",
 	"ENVIRONMENT_RISK_LOCKED": "浏览器访问环境仍处于风控锁定状态",
 	"NOT_SUPPORTED": "当前平台不支持此事项",
 	"JOB_NOT_FOUND": "没有找到指定任务",
-	"CONTACT_NOT_FOUND": "没有在沟通列表里找到该联系人",
-	"CRAWL_RUN_NOT_FOUND": "没有找到该采集任务",
-	"SAVED_SEARCH_NOT_FOUND": "没有找到该本地预设或监控",
-	"WORKFLOW_NOT_FOUND": "没有找到该任务记录",
 	"WORKFLOW_TIMEOUT": "任务运行超时",
 	"WORKFLOW_STOPPED": "任务已停止",
-	"WORKFLOW_BUSY": "该任务正在另一个窗口或进程中执行",
-	"CRAWL_BUSY": "该采集任务正在另一个窗口或进程中执行",
-	"CRAWL_UNAVAILABLE": "采集所需的可选依赖没有安装",
 	"WORKFLOW_PLAN_MISMATCH": "任务信息与已有记录不一致",
 	"INVALID_PARAM": "请求参数无效",
-	"AUTH_EXPIRED": "登录状态已过期",
-	"AI_API_ERROR": "AI 服务调用失败",
-	"AI_NOT_CONFIGURED": "AI 服务尚未配置",
-	"ACTION_UNCONFIRMED": "操作可能已生效，但未能确认",
-	"ALREADY_APPLIED": "已投递过该职位",
-	"ALREADY_GREETED": "已向该招聘者打过招呼",
-	"ENDPOINT_DEPRECATED": "平台接口已迁移，当前版本无法发送",
-	"EXCHANGE_NOT_AVAILABLE": "交换联系方式按钮尚未解锁",
-	"LOCAL_IO_ERROR": "本地文件读写失败",
-	"LOCAL_STATE_WRITE_FAILED": "平台操作已完成，但本地状态保存失败",
-	"RESUME_NOT_FOUND": "本地简历不存在",
-	"SAVED_SEARCH_INVALID": "本地预设或监控的参数已损坏",
-	"UNKNOWN": "平台返回了未识别的错误",
-	"WIZARD_INPUT_REQUIRED": "workflow 缺少必要输入",
 }
 
 RECOVERY_LABELS = {
 	"AUTH_REQUIRED": "请先登录当前平台，然后选择“恢复已有任务”。",
 	"TOKEN_REFRESH_FAILED": "请重新登录当前平台，然后选择“恢复已有任务”。",
 	"NETWORK_ERROR": "请检查网络后重试，或返回主菜单选择其他事项。",
-	"INTERNAL_ERROR": "这不是网络问题，重试不会有帮助。请升级到最新版本，仍出现时把这次的命令和报错反馈给维护者。",
-	"BROWSER_NAV_TIMEOUT": "请用已登录的 Chrome 调试端口重试，或先重新登录后再恢复任务。",
-	"BROWSER_KERNEL_MISSING": "这不是网络问题，重试不会有帮助。请退出向导，运行 python -m patchright install chromium（使用运行 boss 的同一个解释器）安装浏览器内核后重新执行命令。",
 	"RATE_LIMITED": "请稍后再试。",
-	"ACCOUNT_RISK": "请停止自动操作并在平台内检查账号状态；确认风险解除后，由你本人执行 boss clean --risk-lock，再重新启动向导恢复任务。",
-	"ENVIRONMENT_RISK": "请停止自动操作，保留当前浏览器 profile，在平台官方页面确认风险解除后，由你本人执行 boss clean --risk-lock，再重新启动向导恢复任务。",
-	"ENVIRONMENT_RISK_LOCKED": "风险锁不会自动解除：请在 BOSS 官方目标业务页确认风险已解除，由你本人执行 boss clean --risk-lock，再重新启动向导恢复任务。",
+	"ACCOUNT_RISK": "请停止自动操作并在平台内检查账号状态。",
+	"ENVIRONMENT_RISK": "请停止自动操作，保留当前浏览器 profile，在平台官方页面确认后再手动发起。",
+	"ENVIRONMENT_RISK_LOCKED": "请在该 Chrome 里打开 BOSS 直聘职位列表页，确认能正常加载并等几分钟后再继续。",
 	"NOT_SUPPORTED": "请返回并选择当前平台支持的事项。",
 	"JOB_NOT_FOUND": "请返回主菜单后重新选择任务。",
-	"CONTACT_NOT_FOUND": "请返回并改用对方的 uid 重试；也可以先在 boss chat 里确认会话仍在。",
-	"CRAWL_RUN_NOT_FOUND": "请返回并重新选择采集任务，或新建一个采集任务。",
-	"SAVED_SEARCH_NOT_FOUND": "请返回并重新选择预设或监控；也可以先用 boss preset list / boss watch list 查看已有条目。",
-	"WORKFLOW_NOT_FOUND": "请返回主菜单后重新选择任务。",
 	"WORKFLOW_TIMEOUT": "请选择“恢复已有任务”继续。",
 	"WORKFLOW_PLAN_MISMATCH": "请使用原任务恢复，或新建任务。",
 	"INVALID_PARAM": "请换一条结果重试，或返回结果列表重新选择。",
-	"AUTH_EXPIRED": "请重新登录当前平台，然后选择“恢复已有任务”。",
-	"AI_API_ERROR": "检查网络连接与 AI 密钥配置后重试。",
-	"AI_NOT_CONFIGURED": "先执行 boss ai config --provider <provider> --model <model> --api-key <key> 完成配置。",
-	"ACTION_UNCONFIRMED": "动作可能已生效：先用 boss hr chatmsg <friend_id> 核实，不要直接重试。",
-	"ALREADY_APPLIED": "该职位已投递过：用 boss me --section deliver 查看投递记录，或用 boss chat 跟进。",
-	"ALREADY_GREETED": "已打过招呼：用 boss chat 查看会话，或返回重新搜索换一批职位。",
-	"ENDPOINT_DEPRECATED": "停止重试：该平台端点已下线，请升级到最新版本并查看 error.details.tracking_issue。",
-	"EXCHANGE_NOT_AVAILABLE": "先回复候选人（boss hr reply）或请求附件简历，再重新执行交换。",
-	"LOCAL_IO_ERROR": "确认目标路径是可写目录、权限与磁盘空间正常后，再执行。",
-	"LOCAL_STATE_WRITE_FAILED": "先在官方页面核对操作是否已生效；不要自动重发，确认磁盘空间与缓存目录权限后再继续。",
-	"RESUME_NOT_FOUND": "先用 boss resume list 查看可用简历，再重新选择。",
-	"SAVED_SEARCH_INVALID": "执行 boss preset remove <名称>（watch 用 boss watch remove）后重新添加。",
-	"UNKNOWN": "不要自动重试：先在平台官方页面核对操作是否生效，并用 boss doctor 检查登录态与网络。",
-	"WIZARD_INPUT_REQUIRED": "headless 模式请通过 --input-json 提供完整输入，或用 run_id 恢复。",
-	"WORKFLOW_STOPPED": "任务已停止；如需继续，请选择“恢复已有任务”。",
-	"WORKFLOW_BUSY": "请等它结束，或选择“查看任务状态”确认进度后再恢复。",
-	# 具体安装命令由 recovery_message 按当前已有的依赖组动态拼出（Issue #1068）。
-	"CRAWL_UNAVAILABLE": "这不是网络问题，重试不会有帮助。请退出向导，补上 crawl 可选依赖后重新执行。",
-	"CRAWL_BUSY": "请等它结束；需要确认进度时执行 boss crawl status <run_id>，不要并发恢复同一个任务。",
 }
 
 # 这些步骤对真人噪声大，TTY 进度里默认静默。
@@ -168,24 +118,6 @@ def error_message(code: str, message: str | None = None) -> str:
 
 def recovery_message(code: str, recovery_action: str | None = None) -> str | None:
 	localized = RECOVERY_LABELS.get(code)
-	if code == "BROWSER_KERNEL_MISSING":
-		# 安装命令依赖运行本 CLI 的解释器（`uv tool install` 不把 patchright
-		# 放进 PATH，Issue #1060）：有动态命令时用它替换静态说法。
-		from boss_agent_cli.services.browser_runtime import patchright_install_command
-
-		command = str(recovery_action) if recovery_action and "patchright" in str(recovery_action) else None
-		return (
-			"这不是网络问题，重试不会有帮助。请退出向导，运行 "
-			f"{command or patchright_install_command()} 安装浏览器内核后重新执行命令。"
-		)
-	if code == "CRAWL_UNAVAILABLE":
-		# 安装命令要带上已经可用的依赖组：uv tool install 会重建环境（Issue #1068）。
-		from boss_agent_cli.services.install_extras import extras_install_hint
-
-		return (
-			"这不是网络问题，重试不会有帮助。请退出向导，用 "
-			f"{extras_install_hint('crawl')} 补上采集依赖后重新执行。"
-		)
 	if localized:
 		return localized
 	if recovery_action and any("\u4e00" <= char <= "\u9fff" for char in str(recovery_action)):
@@ -268,11 +200,10 @@ def busy_status(message: str) -> Iterator[None]:
 
 
 def render_error(*, code: str, message: str | None = None, recovery_action: str | None = None) -> None:
-	message_text = display.escape_markup(error_message(code, message))
-	display.console.print(Panel(message_text, title="操作未完成", border_style="red"))
+	display.console.print(Panel(error_message(code, message), title="操作未完成", border_style="red"))
 	recovery = recovery_message(code, recovery_action)
 	if recovery:
-		display.console.print(f"[bold]下一步：[/bold]{display.escape_markup(recovery)}")
+		display.console.print(f"[bold]下一步：[/bold]{recovery}")
 
 
 def render_cancelled() -> None:
@@ -387,21 +318,19 @@ def _count_list_items(last_result: Any) -> int | None:
 
 def render_job_card_zh(job: Mapping[str, Any]) -> None:
 	"""Human-facing Chinese job detail panel for TTY wizard."""
-	esc = display.escape_markup
-	title = esc(job.get("title") or "未命名职位")
-	salary = esc(job.get("salary") or "-")
-	company = esc(job.get("company") or "-")
-	city = esc(job.get("city") or "-")
-	experience = esc(job.get("experience") or "-")
-	education = esc(job.get("education") or "-")
-	boss = esc(job.get("boss_name") or "-")
-	boss_title = esc(job.get("boss_title") or "")
+	title = str(job.get("title") or "未命名职位")
+	salary = str(job.get("salary") or "-")
+	company = str(job.get("company") or "-")
+	city = str(job.get("city") or "-")
+	experience = str(job.get("experience") or "-")
+	education = str(job.get("education") or "-")
+	boss = str(job.get("boss_name") or "-")
+	boss_title = str(job.get("boss_title") or "")
 	skills = job.get("skills") or job.get("labels") or []
-	skill_str = "、".join(esc(item) for item in skills[:12]) if skills else "-"
+	skill_str = "、".join(str(item) for item in skills[:12]) if skills else "-"
 	desc = str(job.get("description") or "")
 	if len(desc) > 420:
 		desc = desc[:420] + "…"
-	desc = esc(desc)
 
 	lines = [
 		f"[bold cyan]{title}[/bold cyan]  [yellow]{salary}[/yellow]",
@@ -411,7 +340,7 @@ def render_job_card_zh(job: Mapping[str, Any]) -> None:
 		f"招聘者 {boss}" + (f"（{boss_title}）" if boss_title else ""),
 	]
 	if job.get("address"):
-		lines.append(f"地址 {esc(job.get('address'))}")
+		lines.append(f"地址 {job.get('address')}")
 	if desc:
 		lines.append("")
 		lines.append(f"[bold]职位描述[/bold]\n{desc}")
@@ -420,29 +349,28 @@ def render_job_card_zh(job: Mapping[str, Any]) -> None:
 
 def render_crawl_job_brief(job: Mapping[str, Any], *, with_description: bool = False) -> None:
 	"""On-demand local crawl row: compact by default, optional short description."""
-	esc = display.escape_markup
-	title = esc(job.get("title") or "未命名职位")
-	salary = esc(job.get("salary") or "-")
-	company = esc(job.get("company") or "-")
-	city = esc(job.get("city") or "-")
-	experience = esc(job.get("experience") or "-")
-	education = esc(job.get("education") or "-")
-	boss = esc(job.get("boss_name") or "")
+	title = str(job.get("title") or "未命名职位")
+	salary = str(job.get("salary") or "-")
+	company = str(job.get("company") or "-")
+	city = str(job.get("city") or "-")
+	experience = str(job.get("experience") or "-")
+	education = str(job.get("education") or "-")
+	boss = str(job.get("boss_name") or "")
 	lines = [
 		f"[bold cyan]{title}[/bold cyan]  [yellow]{salary}[/yellow]",
 		f"公司 {company}  ·  城市 {city}",
 		f"经验 {experience}  ·  学历 {education}",
 	]
 	if boss:
-		boss_title = esc(job.get("boss_title") or "")
+		boss_title = str(job.get("boss_title") or "")
 		lines.append(f"招聘者 {boss}" + (f"（{boss_title}）" if boss_title else ""))
 	labels = job.get("labels") or []
 	if isinstance(labels, list) and labels:
-		lines.append("标签 " + "、".join(esc(item) for item in labels[:8]))
+		lines.append("标签 " + "、".join(str(item) for item in labels[:8]))
 	if job.get("crawl_page") is not None:
 		lines.append(f"采集页 第 {job.get('crawl_page')} 页")
 	if with_description:
-		desc = esc(job.get("description") or "").strip()
+		desc = str(job.get("description") or "").strip()
 		if desc:
 			lines.append("")
 			lines.append(f"[bold]本地描述[/bold]\n{desc}")
@@ -482,10 +410,8 @@ def render_run(run: Mapping[str, Any], *, with_preview: bool = True) -> None:
 		if live == "completed" and int(jobs_seen or 0) > 0:
 			if _render_crawl_summary(run, with_preview=with_preview):
 				return
-		reason = display.escape_markup(
-			data.get("error") or last.get("next_action") or "需要补充信息或人工处理后才能继续"
-		)
-		inner = display.escape_markup(data.get("run_id")) if data.get("run_id") else None
+		reason = str(data.get("error") or last.get("next_action") or "需要补充信息或人工处理后才能继续")
+		inner = data.get("run_id")
 		lines = [
 			f"[bold]{goal_label(run.get('role'), run.get('goal'))}[/bold] 需要你处理后再继续。",
 			"",
@@ -499,7 +425,7 @@ def render_run(run: Mapping[str, Any], *, with_preview: bool = True) -> None:
 		if operator_actions:
 			# 数据驱动：step 自己声明「人该做什么」，renderer 不再猜。
 			lines.append("")
-			lines.extend(display.escape_markup(item) for item in operator_actions)
+			lines.extend(str(item) for item in operator_actions)
 		elif data.get("status") == "risk_stopped" or "非 JSON" in reason or "未登录" in reason or "环境" in reason:
 			# 兜底：SQLite 里的历史 run 没有 operator_actions 字段，仍走旧的子串启发式。
 			lines.append("")
@@ -521,7 +447,7 @@ def render_run(run: Mapping[str, Any], *, with_preview: bool = True) -> None:
 				)
 		next_action = last.get("next_action")
 		if next_action:
-			lines.append(f"命令行恢复：{display.escape_markup(next_action)}")
+			lines.append(f"命令行恢复：{next_action}")
 		display.console.print(Panel("\n".join(lines), title="等待继续", border_style="yellow"))
 		return
 
@@ -556,7 +482,7 @@ def render_run(run: Mapping[str, Any], *, with_preview: bool = True) -> None:
 	table.add_row("事项", f"[bold]{goal}[/bold]")
 	table.add_row("状态", f"[bold]{status_label(status)}[/bold]")
 	if run.get("run_id"):
-		table.add_row("任务编号", f"[dim]{display.escape_markup(run.get('run_id'))}[/dim]")
+		table.add_row("任务编号", f"[dim]{run.get('run_id')}[/dim]")
 	params = run.get("params") if isinstance(run.get("params"), Mapping) else {}
 	inputs = params.get("inputs") if isinstance(params, Mapping) else {}
 	if isinstance(inputs, Mapping) and inputs:
@@ -566,18 +492,18 @@ def render_run(run: Mapping[str, Any], *, with_preview: bool = True) -> None:
 			if value not in (None, "") and key in {"query", "city", "run_id", "resume", "prompt", "name"}
 		)
 		if hint:
-			table.add_row("参数", f"[bold]{display.escape_markup(hint)}[/bold]")
+			table.add_row("参数", f"[bold]{hint}[/bold]")
 	last = _as_mapping(run.get("last_result")) or {}
 	data = _as_mapping(last.get("data")) or {}
 	if data.get("result"):
 		text = str(data.get("result"))
 		if len(text) > 600:
 			text = text[:600] + "…"
-		table.add_row("结果", display.escape_markup(text))
+		table.add_row("结果", text)
 	if data.get("summary"):
-		table.add_row("摘要", f"[bold]{display.escape_markup(data.get('summary'))}[/bold]")
+		table.add_row("摘要", f"[bold]{data.get('summary')}[/bold]")
 	if data.get("path"):
-		table.add_row("文件", f"[bold]{display.escape_markup(data.get('path'))}[/bold]")
+		table.add_row("文件", f"[bold]{data.get('path')}[/bold]")
 	artifacts = last.get("artifacts") or []
 	if artifacts:
 		names, directory = _short_artifact_lines(artifacts)
@@ -808,7 +734,7 @@ def _render_management_result(run: Mapping[str, Any]) -> bool:
 		meta.add_row("待跟进", str(data.get("follow_up_count") or 0))
 		meta.add_row("面试", str(data.get("interview_count") or 0))
 		if summary:
-			meta.add_row("摘要", display.escape_markup(summary))
+			meta.add_row("摘要", summary)
 		# Sample rows from each bucket.
 		preview = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
 		preview.add_column("类型", style="cyan", no_wrap=True)
@@ -821,8 +747,7 @@ def _render_management_result(run: Mapping[str, Any]) -> bool:
 					continue
 				label = item.get("title") or item.get("jobName") or item.get("name") or "—"
 				company = item.get("company") or item.get("brandName") or ""
-				text = f"{label}" + (f" · {company}" if company else "")
-				preview.add_row(kind, display.escape_markup(text))
+				preview.add_row(kind, f"{label}" + (f" · {company}" if company else ""))
 		parts: list[Any] = [headline, Text(""), meta]
 		if preview.row_count:
 			parts.extend([Text(""), Text("明细预览", style="bold"), preview])
@@ -864,9 +789,9 @@ def _render_management_result(run: Mapping[str, Any]) -> bool:
 			table.add_column("v", style="bold")
 			table.add_row("事项", goal_label(run.get("role"), goal))
 			if action:
-				table.add_row("操作", display.escape_markup(action))
+				table.add_row("操作", action)
 			if name:
-				table.add_row("名称", display.escape_markup(name))
+				table.add_row("名称", name)
 			if data.get("removed") is not None:
 				table.add_row("已删除", "是" if data.get("removed") else "否")
 			if data.get("new_count") is not None:
@@ -898,9 +823,9 @@ def _render_management_result(run: Mapping[str, Any]) -> bool:
 			table.add_column("k", style="dim", width=10)
 			table.add_column("v", style="bold")
 			table.add_row("事项", goal_label(run.get("role"), goal))
-			table.add_row("格式", display.escape_markup(data.get("format") or "—"))
+			table.add_row("格式", str(data.get("format") or "—"))
 			table.add_row("条数", str(data.get("count") if data.get("count") is not None else len(items)))
-			table.add_row("文件", display.escape_markup(data.get("path")))
+			table.add_row("文件", str(data.get("path")))
 			display.console.print(Panel(table, title="导出完成", border_style="green"))
 			return True
 		count = len(items)
@@ -943,9 +868,9 @@ def _render_management_result(run: Mapping[str, Any]) -> bool:
 				value = str(data.get(key))
 				if key in {"security_id"} and len(value) > 18:
 					value = value[:12] + "…"
-				table.add_row(label, f"[bold]{display.escape_markup(value)}[/bold]")
+				table.add_row(label, f"[bold]{value}[/bold]")
 		if data.get("status"):
-			table.add_row("详情", f"[dim]{display.escape_markup(data.get('status'))}[/dim]")
+			table.add_row("详情", f"[dim]{data.get('status')}[/dim]")
 		display.console.print(Panel(table, title="操作成功", border_style="green"))
 		return True
 
@@ -1012,25 +937,22 @@ def _short_artifact_lines(paths: Mapping[str, Any] | Sequence[Any]) -> tuple[str
 			entries.append((path.suffix.lstrip(".") or "file", path))
 	if not entries:
 		return "", ""
-	names = "  ".join(
-		f"[bold]{display.escape_markup(kind)}[/bold] {display.escape_markup(path.name)}" for kind, path in entries
-	)
+	names = "  ".join(f"[bold]{kind}[/bold] {path.name}" for kind, path in entries)
 	parent = str(entries[0][1].parent)
 	# Prefer compact home-relative path.
 	home = str(Path.home())
 	if parent.startswith(home):
 		parent = "~" + parent[len(home) :]
-	return names, f"[dim]{display.escape_markup(parent)}[/dim]"
+	return names, f"[dim]{parent}[/dim]"
 
 
 def _clip_text(value: Any, limit: int) -> str:
-	"""裁剪成表格单元格用的单行文本，并按 Rich 字面量转义（见 ``display.escape_markup``）。"""
 	text = " ".join(str(value or "").split())
 	if len(text) <= limit:
-		return display.escape_markup(text)
+		return text
 	if limit <= 1:
-		return display.escape_markup(text[:limit])
-	return display.escape_markup(text[: limit - 1] + "…")
+		return text[:limit]
+	return text[: limit - 1] + "…"
 
 
 def _preview_jobs_from_data(data: Mapping[str, Any], *, limit: int = 5) -> list[dict[str, str]]:
@@ -1210,15 +1132,15 @@ def _render_crawl_summary(run: Mapping[str, Any], *, with_preview: bool = True) 
 		row("目录", artifact_dir)
 
 	if data.get("error") and str(crawl_status) != "completed":
-		row("说明", f"[yellow]{display.escape_markup(data.get('error'))}[/yellow]")
+		row("说明", f"[yellow]{data.get('error')}[/yellow]")
 
 	# Secondary ids, dim — debugging aids.
 	id_bits = []
 	if run.get("run_id"):
-		id_bits.append(f"向导 {display.escape_markup(run.get('run_id'))}")
+		id_bits.append(f"向导 {run.get('run_id')}")
 	inner = data.get("run_id") or last.get("run_id")
 	if inner:
-		id_bits.append(f"采集 {display.escape_markup(inner)}")
+		id_bits.append(f"采集 {inner}")
 	if id_bits:
 		row("编号", f"[dim]{'  ·  '.join(str(bit) for bit in id_bits)}[/dim]")
 
@@ -1232,7 +1154,7 @@ def _render_crawl_summary(run: Mapping[str, Any], *, with_preview: bool = True) 
 			else None
 		)
 		if next_action:
-			row("下一步", f"[bold]{display.escape_markup(next_action)}[/bold]")
+			row("下一步", f"[bold]{next_action}[/bold]")
 
 	# ── Preview under meta: Markdown-style pipe table ───────────────
 	preview_rows = _preview_jobs_from_data(data, limit=5) if with_preview else []

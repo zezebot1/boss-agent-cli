@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import click
 
-from boss_agent_cli.display import boss_command_for_ctx, handle_output, shell_argument
+from boss_agent_cli.display import handle_output
 from boss_agent_cli.platforms import get_platform, list_platforms, list_recruiter_platforms
 
 _READONLY_CAPABILITIES = ["search", "detail", "show", "history", "interviews", "recommend", "me", "status"]
@@ -50,7 +50,7 @@ def _resolve_platform_filter(platform_name: str | None) -> str | None:
 	if platform_name not in candidate_platforms:
 		supported = ", ".join(candidate_platforms)
 		raise click.BadParameter(
-			f"不支持的平台 {platform_name!r}，可选: {supported}",
+			f"unknown platform {platform_name!r}, supported: {supported}",
 			param_hint="--platform",
 		)
 	return platform_name
@@ -69,7 +69,7 @@ def _resolve_capability_filter(capability: str | None) -> str | None:
 	if capability not in known_capabilities:
 		supported = ", ".join(known_capabilities)
 		raise click.BadParameter(
-			f"不支持的能力 {capability!r}，可选: {supported}",
+			f"unknown capability {capability!r}, supported: {supported}",
 			param_hint="--capability",
 		)
 	return capability
@@ -152,8 +152,7 @@ def _render_platforms(data: dict[str, Any]) -> None:
 	lines.append("capability_status_legend")
 	for status, meta in data["capability_status_legend"].items():
 		lines.append(f"{status}\t{meta['label']}\t{meta['description']}")
-	# TTY 渲染必须走 stderr：stdout 只留给七键 JSON 信封。
-	click.echo("\n".join(lines), err=True)
+	click.echo("\n".join(lines))
 
 
 @click.command("platforms")
@@ -162,22 +161,15 @@ def _render_platforms(data: dict[str, Any]) -> None:
 @click.pass_context
 def platforms_cmd(ctx: click.Context, platform_name: str | None, capability: str | None) -> None:
 	"""列出本地已注册平台与能力状态。"""
-	data = platform_capability_data(platform_name, capability)
-	# next_actions 会被 Agent 原样执行，而 --platform 是受约束的取值：
-	# 原来那条 `boss --platform <name> status` 照抄只会换回 INVALID_PARAM，
-	# 等于没有下一步。按本次列出的平台逐个生成可直接运行的命令。
-	# status 读的是该数据目录下的登录态，提示必须保留 --data-dir。
-	data_dir = ctx.obj.get("data_dir")
-	data_dir_option = "" if data_dir is None else f" --data-dir {shell_argument(str(data_dir.resolve()))}"
-	next_actions = [f"boss --platform {item['name']}{data_dir_option} status" for item in data["platforms"]]
-	if not next_actions:
-		# 能力筛选可能把所有平台都过滤掉，此时退回当前平台的状态查询。
-		next_actions.append(boss_command_for_ctx(ctx, "status", include_data_dir=True))
-	next_actions.append(boss_command_for_ctx(ctx, "schema", include_data_dir=True))
 	handle_output(
 		ctx,
 		"platforms",
-		data,
+		platform_capability_data(platform_name, capability),
 		render=_render_platforms,
-		hints={"next_actions": next_actions},
+		hints={
+			"next_actions": [
+				"boss --platform <name> status — 检查指定平台本地登录态",
+				"boss schema — 查看命令级可用性矩阵",
+			],
+		},
 	)

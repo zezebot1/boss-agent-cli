@@ -88,6 +88,9 @@ class BossPlatform(Platform):
 	def friend_list(self, page: int = 1) -> dict[str, Any]:
 		return self._client.friend_list(page)
 
+	def reply(self, friend_id: str, message: str) -> dict[str, Any]:
+		return self._client.reply(friend_id, message)
+
 	# ── P0+ 扩展方法（BossClient 全部支持）───────────────
 
 	def resume_baseinfo(self) -> dict[str, Any]:

@@ -26,7 +26,6 @@ from boss_agent_cli.api.recruiter_resume import (
 	message_mid,
 	message_texts,
 	new_action_cards_matching,
-	new_messages,
 	new_messages_matching,
 	resume_friend,
 	save_resume,
@@ -42,8 +41,7 @@ const squashText = (text) => String(text || '').replace(/\\s+/g, ' ').trim();
 const escapeHtml = (text) => String(text)
 	.replace(/&/g, '&amp;')
 	.replace(/</g, '&lt;')
-	.replace(/>/g, '&gt;')
-	.replace(/\\n/g, '<br>');
+	.replace(/>/g, '&gt;');
 const getGeekList = () => {
 	const chatUser = document.querySelector('.chat-user');
 	if (!chatUser) return [null, '.chat-user not found (chat tab not open?)'];
@@ -401,26 +399,11 @@ def _readable_geek_detail(info: Any) -> bool:
 
 _SEND_MESSAGE_ACTION_JS = """
 const escaped = escapeHtml(args.content);
-if (editor.conversationLoading$) {
+if (editor.disabled || editor.conversationLoading$) {
 	return {ok: false, error: 'editor is disabled or conversation is loading', log};
 }
 editor.draft[editor.uniqueId] = args.content;
 input.innerHTML = escaped;
-try { editor.handleKeyup({ key: '', keyCode: 0, preventDefault: () => {}, stopPropagation: () => {} }); } catch (e) { log.push('handleKeyup threw: ' + e.message); }
-// 页面在自己的 input 回调里异步清 disabled：固定等 150ms 在慢页面/慢机器上会
-// 误判为「编辑器不可用」并放弃发送。改为有上限的轮询，仍不强制清除 disabled。
-const readyStartedAt = Date.now();
-const readyDeadline = readyStartedAt + 3000;
-while (editor.disabled && Date.now() < readyDeadline) {
-	await sleep(50);
-}
-log.push('editor ready after ' + (Date.now() - readyStartedAt) + 'ms');
-if (editor.disabled) {
-	return {ok: false, error: 'editor is disabled or conversation is loading', log};
-}
-if (editor.conversationLoading$ || (editor.conversation$ && editor.conversation$.friendId !== args.targetFriendId)) {
-	return {ok: false, error: 'conversation switched away from target before send', log};
-}
 log.push('editbox html set, calling sendText');
 try {
 	const ret = editor.sendText();
@@ -460,9 +443,7 @@ try {
 	if (ret && typeof ret.then === 'function') await ret;
 	log.push('handleExChange returned');
 } catch (e) {
-	// handleExChange 抛错时请求可能已经发出：不能当成「确定未发送」的普通失败，
-	// 自动化会把它放回 pending 并在下一轮重发（Issue #990）。
-	return {ok: false, action_interrupted: true, error: 'handleExChange threw: ' + e.message, log, componentName: args.componentName};
+	return {ok: false, error: 'handleExChange threw: ' + e.message, log, componentName: args.componentName};
 }
 
 await sleep(args.preConfirmUiWaitMs);
@@ -541,9 +522,8 @@ class BossRecruiterClient(_BaseHttpClient):
 
 	def _headers_for(self, url: str) -> dict[str, str]:
 		headers = super()._headers_for(url)
-		if url in (ep.BOSS_RECOMMEND_GEEK_LIST_URL, ep.BOSS_CHAT_START_URL, ep.BOSS_SEND_JOB_LOCATION_URL):
+		if url in (ep.BOSS_RECOMMEND_GEEK_LIST_URL, ep.BOSS_CHAT_START_URL):
 			# 从当前 jar 取值，包含上次响应轮换的 bst；不改变既有端点的请求头。
-			# sendJobLocation 与推荐开聊一样要带页面 zp_token（bst），空值不发。
 			if bst := self._get_client().cookies.get("bst"):
 				headers["zp_token"] = str(bst)
 		return headers
@@ -693,7 +673,7 @@ class BossRecruiterClient(_BaseHttpClient):
 				"ok": False,
 				"error": "browser action interrupted; outcome unknown",
 				"action_interrupted": True,
-				"log": [f"EXCEPTION {type(exc).__name__}: {exc}"],
+				"log": [],
 			}, []
 		result = capture.get("value") if isinstance(capture, dict) else capture
 		events = cast("list[dict[str, Any]]", capture.get("events", []) if isinstance(capture, dict) else [])
@@ -816,13 +796,9 @@ class BossRecruiterClient(_BaseHttpClient):
 
 	def _chat_ws_evidence(self, events: list[dict[str, Any]], expected_bits: list[str]) -> dict[str, Any]:
 		ws_send = [event for event in events if event.get("kind") == "ws_send"]
-		# 帧里提取不到任何文本（二进制 / 压缩 / 新编码）时 matched 必然为 0：
-		# 单独计数，才能把「没有发送帧」和「有帧但读不出文本」区分开（#735）。
-		ws_send_without_text = sum(1 for event in ws_send if not event.get("utf8_bits"))
 		return {
 			"event_count": len(events),
 			"ws_send_count": len(ws_send),
-			"ws_send_without_text": ws_send_without_text,
 			"matched_ws_count": len(self._matching_chat_send_events(events, expected_bits)),
 		}
 
@@ -857,8 +833,8 @@ class BossRecruiterClient(_BaseHttpClient):
 	def _page_error_message(result: Any) -> str:
 		"""从前端代劳返回中提取错误串（reply / exchange 失败信封共用）。"""
 		if isinstance(result, dict):
-			return str(result.get("error") or "页面未返回可用的结果")
-		return f"页面返回了非预期结果: {result!r}"
+			return str(result.get("error") or "unexpected page result")
+		return f"unexpected result: {result!r}"
 
 	@staticmethod
 	def _chat_action_failure_response(
@@ -980,11 +956,6 @@ class BossRecruiterClient(_BaseHttpClient):
 			"customGreetingGuide": "-1",
 		}
 		return self._request("POST", ep.BOSS_CHAT_START_URL, data=data, retry=False)
-
-	def send_job_location(self, *, job_id: str | int, to_user_id: int, security_id: str) -> dict[str, Any]:
-		"""向已有会话发送工作地点卡片。调用方必须传入本次 friend_detail 的会话级 securityId。"""
-		data = {"jobId": job_id, "toUserId": to_user_id, "securityId": security_id}
-		return self._request("POST", ep.BOSS_SEND_JOB_LOCATION_URL, data=data, retry=False)
 
 	# ── 候选人搜索与简历 ──────────────────────────────────
 
@@ -1213,8 +1184,6 @@ class BossRecruiterClient(_BaseHttpClient):
 				events=events,
 				expected_bits=[content],
 			)
-		history: dict[str, Any] | None = None
-		history_attempts = 0
 		if isinstance(result, dict) and result.get("ok"):
 			matched_ws = self._matching_chat_send_events(events, [content])
 			history = self._exchange_history_evidence(
@@ -1251,26 +1220,13 @@ class BossRecruiterClient(_BaseHttpClient):
 				}
 			# 页面脚本成功时会显式返回 error: null，setdefault 不会覆盖它。
 			if not result.get("error"):
-				result["error"] = "页面动作未在目标聊天记录中得到确认"
+				result["error"] = "outgoing frame or page action does not confirm acceptance in target chat history"
 			if history.get("control_stop"):
 				result["confirmation_stop"] = history["control_stop"]
 		# Surface the page-side error in CLI envelope shape
 		err_msg = self._page_error_message(result)
-		# 把「回读核对是否执行、命中多少」也放进失败 details：只有 ws_evidence 时
-		# 看不出历史回读到底跑没跑，社区反馈的 matched_ws_count=0 无法进一步定位。
-		history_extra: dict[str, Any] | None = None
-		if history is not None:
-			history_extra = {
-				"history_checked": history.get("checked"),
-				"history_matched_count": history.get("matched_count"),
-				"history_attempts": history_attempts,
-				"history_new_count": history.get("new_count"),
-				"history_self_count": history.get("self_count"),
-				"history_recipient_count": history.get("recipient_count"),
-				"history_error": history.get("error"),
-			}
 		return self._chat_action_failure_response(
-			message=f"发送消息未确认: {err_msg}；{_ACTION_UNCONFIRMED_HINT.format(friend_id=friend_id)}",
+			message=f"send_message_by_friend unconfirmed: {err_msg}；{_ACTION_UNCONFIRMED_HINT.format(friend_id=friend_id)}",
 			payload=self._chat_action_failure_data(
 				action="reply",
 				friend_id=friend_id,
@@ -1278,7 +1234,6 @@ class BossRecruiterClient(_BaseHttpClient):
 				expected_bits=[content],
 				result=result,
 				events=events,
-				extra=history_extra,
 			),
 			error_code="ACTION_UNCONFIRMED",
 		)
@@ -1433,15 +1388,8 @@ class BossRecruiterClient(_BaseHttpClient):
 
 		if not (isinstance(result, dict) and result.get("ok")):
 			err = self._page_error_message(result)
-			# handleExChange 抛错时动作可能已经发出：文案必须与 ACTION_UNCONFIRMED
-			# 的「先核实」契约一致，不能让 Agent 读成「确定没发出去」（Issue #990）。
-			interrupted = isinstance(result, dict) and result.get("action_interrupted")
 			return self._chat_action_failure_response(
-				message=(
-					f"交换联系方式请求未确认: {err}；{_ACTION_UNCONFIRMED_HINT.format(friend_id=friend_id)}"
-					if interrupted
-					else f"交换联系方式请求失败: {err}"
-				),
+				message=f"exchange_request_by_friend failed: {err}",
 				payload=self._chat_action_failure_data(
 					action="exchange",
 					friend_id=friend_id,
@@ -1451,7 +1399,9 @@ class BossRecruiterClient(_BaseHttpClient):
 					events=events,
 					extra={"exchange_type": exchange_type, "componentName": component_name},
 				),
-				error_code="ACTION_UNCONFIRMED" if interrupted else None,
+				error_code="ACTION_UNCONFIRMED"
+				if isinstance(result, dict) and result.get("action_interrupted")
+				else None,
 			)
 
 		matched_ws = self._exchange_ws_matches(events, expected_bits, exchange_type)
@@ -1516,9 +1466,6 @@ class BossRecruiterClient(_BaseHttpClient):
 			"history_checked": history["checked"],
 			"history_matched_count": 0,
 			"history_attempts": history_attempts,
-			"history_new_count": history.get("new_count"),
-			"history_self_count": history.get("self_count"),
-			"history_recipient_count": history.get("recipient_count"),
 		}
 		if check_availability:
 			extra["history_self_message"] = self_message
@@ -1529,7 +1476,7 @@ class BossRecruiterClient(_BaseHttpClient):
 		if side_effects:
 			extra["side_effects"] = side_effects
 		return self._chat_action_failure_response(
-			message=f"交换联系方式请求未确认: {err}；{_ACTION_UNCONFIRMED_HINT.format(friend_id=friend_id)}",
+			message=f"exchange_request_by_friend unconfirmed: {err}；{_ACTION_UNCONFIRMED_HINT.format(friend_id=friend_id)}",
 			payload=self._chat_action_failure_data(
 				action="exchange",
 				friend_id=friend_id,
@@ -1575,30 +1522,18 @@ class BossRecruiterClient(_BaseHttpClient):
 		except Exception as exc:  # noqa: BLE001 — 写操作已发生，回读失败只能记为未确认
 			if is_request_stop(exc):
 				return {"checked": False, "matched_count": 0, "resume_matched_count": 0,
-					"new_count": 0, "self_count": 0, "recipient_count": 0,
 					"control_stop": getattr(exc, "code", "WORKFLOW_STOPPED"), "error": type(exc).__name__}
-			return {"checked": False, "matched_count": 0, "resume_matched_count": 0,
-				"new_count": 0, "self_count": 0, "recipient_count": 0, "error": type(exc).__name__}
+			return {"checked": False, "matched_count": 0, "resume_matched_count": 0, "error": type(exc).__name__}
 		if not isinstance(response, dict) or response.get("code") != 0:
 			code = response.get("code") if isinstance(response, dict) else None
 			return {
 				"checked": False,
 				"matched_count": 0,
 				"resume_matched_count": 0,
-				"new_count": 0,
-				"self_count": 0,
-				"recipient_count": 0,
 				"error": f"chat_history code={code}",
 			}
 		data = response.get("zpData")
 		aids, exclude = self._exchange_aid_filter(exchange_type)
-		# 漏斗计数：新消息 → 自己发出 → 收件人匹配。文案 / 卡片命中之外，
-		# 失败详情能指出到底卡在哪一步（mid 缺失、from 缺失、或文案不匹配）。
-		fresh = new_messages(data, baseline_mids=baseline_mids, since_ms=since_ms)
-		self_authored = [message for message in fresh if sent_by_self(message, friend_id)]
-		recipient_matched = [
-			message for message in self_authored if self._history_recipient_matches(message, friend_id)
-		]
 
 		def _new_matches(
 			match_texts: tuple[str, ...], card_aids: frozenset[int] | None, card_exclude: frozenset[int]
@@ -1624,14 +1559,7 @@ class BossRecruiterClient(_BaseHttpClient):
 
 		matched_count = _new_matches(texts, aids, exclude)
 		resume_count = _new_matches(_RESUME_REQUEST_TEXTS, frozenset({_RESUME_REQUEST_AID}), frozenset())
-		return {
-			"checked": True,
-			"matched_count": matched_count,
-			"resume_matched_count": resume_count,
-			"new_count": len(fresh),
-			"self_count": len(self_authored),
-			"recipient_count": len(recipient_matched),
-		}
+		return {"checked": True, "matched_count": matched_count, "resume_matched_count": resume_count}
 
 	@staticmethod
 	def _history_recipient_matches(message: dict[str, Any], friend_id: int) -> bool:

@@ -6,18 +6,15 @@ from boss_agent_cli.compliance import require_compliance_allowed
 from boss_agent_cli.commands._platform import get_platform_instance
 from boss_agent_cli.commands._contact_lookup import current_friend_security_id_or_emit, resolve_friend_or_emit
 from boss_agent_cli.display import boss_command_for_ctx, handle_auth_errors, handle_not_supported, handle_output, handle_platform_error_output, render_message_panel
-from boss_agent_cli.services.chat_utils import message_list
-from boss_agent_cli.services.pagination import UNKNOWN_HAS_MORE_OPERATOR_ACTION, list_pagination
 
 
 @click.command("chat-summary")
 @click.argument("security_id", metavar="UID_OR_SECURITY_ID")
-@click.option("--page", default=1, type=click.IntRange(min=1), help="页码")
-@click.option("--count", default=20, type=click.IntRange(min=1), help="每页消息数量")
+@click.option("--page", default=1, help="页码")
+@click.option("--count", default=20, help="每页消息数量")
 @click.pass_context
 @handle_auth_errors("chat-summary")
 def chat_summary_cmd(ctx: click.Context, security_id: str, page: int, count: int) -> None:
-	"""基于聊天历史生成结构化摘要与下一步建议。"""
 	if not require_compliance_allowed(ctx, "chat-summary"):
 		ctx.exit(1)
 
@@ -45,23 +42,8 @@ def chat_summary_cmd(ctx: click.Context, security_id: str, page: int, count: int
 			handle_platform_error_output(ctx, "chat-summary", platform, resp, fallback_message="聊天记录获取失败")
 			return
 		msg_data = platform.unwrap_data(resp) or {}
-		messages = message_list(msg_data)
-		pagination = list_pagination(msg_data, page=page, rows=messages)
+		messages = msg_data.get("messages") or msg_data.get("historyMsgList") or []
 		summary = summarize_messages(messages, friend_uid=gid)
-
-		hints: dict[str, list[str]] = {
-			"next_actions": [
-				boss_command_for_ctx(ctx, "chat", include_data_dir=True),
-				boss_command_for_ctx(ctx, f"chatmsg {gid}", include_data_dir=True),
-			]
-		}
-		if pagination["has_more"] is True:
-			hints["next_actions"].append(boss_command_for_ctx(
-				ctx, f"chat-summary {gid} --page {pagination['page'] + 1} --count {count}",
-				include_data_dir=True,
-			))
-		elif pagination["has_more"] is None:
-			hints["operator_actions"] = [UNKNOWN_HAS_MORE_OPERATOR_ACTION]
 
 	handle_output(
 		ctx,
@@ -72,7 +54,11 @@ def chat_summary_cmd(ctx: click.Context, security_id: str, page: int, count: int
 			"name": friend_name,
 			**summary,
 		},
-		pagination=pagination,
 		render=lambda d: render_message_panel(d, title="chat-summary"),
-		hints=hints,
+		hints={
+			"next_actions": [
+				boss_command_for_ctx(ctx, "chat"),
+				boss_command_for_ctx(ctx, f"chatmsg {gid}"),
+			]
+		},
 	)

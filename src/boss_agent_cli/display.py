@@ -5,113 +5,35 @@ Pipe mode (Agent): JSON envelope to stdout.
 --json flag: Force JSON to stdout even in TTY.
 """
 
-import datetime
 import sys
 import threading
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any, Callable
 
-import click
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from boss_agent_cli.output import emit_success, is_local_io_error, redact_sensitive_text
+from boss_agent_cli.output import emit_success
 from boss_agent_cli.schema.error_codes import ERROR_CODES
-from boss_agent_cli.services.browser_runtime import (
-	is_browser_kernel_missing,
-	patchright_headless_shell_command,
-	patchright_install_command,
-)
 
 # Rich output goes to stderr so stdout stays clean for Agent JSON
 console = Console(stderr=True)
 
 
-def escape_markup(value: Any) -> str:
-	"""把平台 / 用户外部字符串转成 Rich 按字面渲染的文本。
-
-	Rich 默认把字符串当 markup 解析：未配对的闭合标签（``[/bold]``）直接抛
-	MarkupError 让整条 TTY 输出崩掉，``[link=...]`` 则会把终端渲染成可点击
-	超链接（OSC 8）。公司名、职位名、职位描述、聊天内容、昵称都是平台外部
-	输入，进入 Rich 前一律经过这里；代码自身的样式标签保持不变。
-	"""
-	return escape(str(value))
-
-
-_SHELL_METACHARACTERS = frozenset("'\"`$\\!*?[]{}()<>|&;#")
-
-
-def shell_argument(value: str) -> str:
-	"""Quote *value* so it survives being copied into a runnable hint verbatim.
-
-	只在需要时加引号：shlex.quote 用 ASCII 安全字符集，会把中文名也包上引号。
-	除空白外还要挡 shell 元字符——简历名、watch 名、预设名都是自由文本：
-
-	- 空白会把一个名字拆成多个参数；
-	- ``its'fine`` 这种落单的单引号会让整条提示变成非法 shell（引号没闭合）；
-	- ``*`` / ``$HOME`` / 开头的 ``~`` 会在终端里被展开成别的东西。
-
-	以上情况统一加 POSIX 单引号（内部的单引号按 ``'\\''`` 转义）。
-	"""
-	if not any(ch.isspace() or ch in _SHELL_METACHARACTERS for ch in value) and not value.startswith("~"):
-		return value
-	return "'" + value.replace("'", "'\\''") + "'"
-
-
-def boss_command(command: str, *, platform_name: str = "zhipin", data_dir: Path | None = None, role: str | None = None) -> str:
-	"""构造后继命令；依赖本地状态时显式保留数据目录。"""
+def boss_command_for_ctx(ctx: Any, command: str) -> str:
+	"""Return a platform-aware boss subcommand."""
+	platform_name = "zhipin"
+	if ctx and getattr(ctx, "obj", None):
+		platform_name = ctx.obj.get("platform") or "zhipin"
 	prefix = "boss" if platform_name == "zhipin" else f"boss --platform {platform_name}"
-	if data_dir is not None:
-		prefix += f" --data-dir {shell_argument(str(data_dir.resolve()))}"
-	if role:
-		# 部分命令组（如 agent）不在 hr 组下，重放时必须显式带角色。
-		prefix += f" --role {role}"
 	return f"{prefix} {command}".strip()
 
 
-def boss_command_for_ctx(
-	ctx: Any,
-	command: str,
-	*,
-	include_data_dir: bool = False,
-	role: str | None = None,
-) -> str:
-	"""构造平台感知命令，可选择保留当前数据目录与角色。"""
-	platform_name = "zhipin"
-	data_dir = None
-	if ctx and getattr(ctx, "obj", None):
-		platform_name = ctx.obj.get("platform") or "zhipin"
-		if include_data_dir:
-			data_dir = ctx.obj.get("data_dir")
-	return boss_command(command, platform_name=platform_name, data_dir=data_dir, role=role)
-
-
-def show_command_for_ctx(ctx: Any, *, index_saved: bool) -> str | None:
-	"""编号查看命令：只有本次列表写入了编号索引时才可用。
-
-	``boss show <#>`` 读的是索引里最近一次写入的列表，不是屏幕上这张表；
-	没写索引时给出编号会让用户打开另一条职位（Issue #925）。
-	"""
-	if not index_saved:
-		return None
-	return boss_command_for_ctx(ctx, "show <#>", include_data_dir=True)
-
-
 def login_action_for_ctx(ctx: Any) -> str:
-	"""登录恢复使用原平台与数据目录，避免登录后原命令仍无会话。"""
-	return boss_command_for_ctx(ctx, "login", include_data_dir=True)
-
-
-def auth_required_hints(ctx: Any) -> dict[str, list[str]]:
-	"""登录类错误附带的下一步：命令给 Agent 执行，说明给真人扫码。"""
-	login_action = login_action_for_ctx(ctx)
-	return {
-		"next_actions": [login_action],
-		"operator_actions": [f"在终端执行 {login_action}，按提示用 BOSS 直聘 App 扫码完成登录后重试"],
-	}
+	"""Return the platform-aware login recovery command."""
+	return boss_command_for_ctx(ctx, "login")
 
 
 def error_contract_for_code(
@@ -128,99 +50,10 @@ def error_contract_for_code(
 	)
 
 
-def platform_error_contract(
-	code: str,
-	*,
-	ctx: Any = None,
-	clean_command: str | None = None,
-	doctor_command: str | None = None,
-) -> tuple[bool, str | None, dict[str, Any] | None]:
-	"""Return ``(recoverable, recovery_action, hints)`` for a platform error code.
-
-	风控码的恢复指引与 ``next_actions`` 一律以 ``RISK_ERROR_CONTRACTS`` 为准，
-	避免各命令手工拼装出互相矛盾的停止指令。有运行上下文的调用方传入 ``ctx``：
-	风险锁写在 ``<data_dir>/.cdp_risk_lock``，裸 ``boss clean --risk-lock`` 会去
-	默认目录解锁，自定义目录的锁原样保留且命令不报错（Issue #978）。
-	"""
-	recoverable, recovery_action = error_contract_for_code(code)
-	if code in RISK_ERROR_CONTRACTS:
-		recovery_action, hints = risk_error_contract(code, ctx=ctx, clean_command=clean_command, doctor_command=doctor_command)
-		return recoverable, recovery_action, hints
-	return recoverable, recovery_action, None
-
-
-def risk_error_message(code: str) -> str:
-	"""Return a stop-oriented message for a risk code.
-
-	风控信封不透传异常或平台响应文本（可能带临时凭据），只暴露稳定错误码与
-	登记表文案；具体停止指引由 ``recovery_action`` / ``hints`` 承载。
-	"""
-	label = str(ERROR_CODES.get(code, {}).get("message") or "命中平台风控")
-	return f"{label}；停止自动化访问并在官方页面处理"
-
-
-def handle_browser_kernel_missing(ctx: Any, command: str, exc: Exception) -> None:
-	"""内核缺失的统一出口：BROWSER_KERNEL_MISSING + 可执行的安装指引。
-
-	Playwright 报 ``Executable doesn't exist`` / ``Playwright was just installed``
-	是确定性失败：patchright 已升级但对应修订版的 Chromium 还没装，重试同一条
-	命令（含 wizard 的自动重试）永远不会成功。此前命令层把它兜成
-	``NETWORK_ERROR`` +「重试」，Agent 会拿同一条命令反复打平台。登录链路
-	（``commands/_login_errors.py``）早已识别这条错误，命令层与 wizard 现在共用
-	同一份契约与文案。异常文本可能带本机路径，只作为 ``details.cause`` 保留
-	首行，不进 message。
-	"""
-	recoverable, _ = error_contract_for_code("BROWSER_KERNEL_MISSING")
-	install_command = patchright_install_command()
-	headless_command = patchright_headless_shell_command()
-	doctor = boss_command_for_ctx(ctx, "doctor", include_data_dir=True)
-	cause = (str(exc) or type(exc).__name__).splitlines()[0][:300]
-	handle_error_output(
-		ctx,
-		command,
-		code="BROWSER_KERNEL_MISSING",
-		message="patchright 浏览器内核缺失或与所需修订版不匹配",
-		recoverable=recoverable,
-		# 恢复动作必须是**当前安装形态下可执行**的命令：`uv tool install` 只把
-		# boss / boss-mcp 放进 PATH，裸 `patchright install chromium` 会 command
-		# not found（Issue #1060）。用运行本 CLI 的解释器调模块入口，版本也必然
-		# 与启动浏览器时一致。
-		recovery_action=install_command,
-		details={"cause": cause},
-		hints={
-			"next_actions": [install_command, doctor],
-			"operator_actions": [
-				f"浏览器内核安装完成后重新执行原命令；缺的是 headless shell 时运行 {headless_command}",
-				f"仍失败时先跑 {doctor} 核对所需修订版与本机已安装版本",
-			],
-		},
-	)
-
-
-def platform_error_message(code: str, message: str | None, fallback_message: str) -> str:
-	"""Return the envelope message for a platform error code.
-
-	风控码只输出登记表文案：平台响应原文可能带临时凭据，不进信封。
-	"""
-	if code in RISK_ERROR_CONTRACTS:
-		return risk_error_message(code)
-	return message or fallback_message
-
-
-def json_forced(ctx: Any) -> bool:
-	"""Only the explicit ``--json`` flag, not merely piped stdout.
-
-	``digest --format md`` 与 ``stats --format html`` 刻意把正文直出到管道，
-	方便用户 ``> 文件``；那是人工路径，不能改成信封。但 ``--json`` 是硬契约
-	（MCP 子进程总是带 ``--json`` 调用 CLI），这两条直出路径必须让位给信封，
-	否则 stdout 不是 JSON，MCP 侧只能报 CLI_ERROR。
-	"""
-	return bool(ctx.obj.get("json_output", False)) if ctx and ctx.obj else False
-
-
 def is_json_mode(ctx: Any) -> bool:
 	"""Check if --json flag is set or stdout is piped (non-TTY)."""
-	return json_forced(ctx) or not sys.stdout.isatty()
+	force_json = ctx.obj.get("json_output", False) if ctx and ctx.obj else False
+	return force_json or not sys.stdout.isatty()
 
 
 def render_operator_actions(hints: dict[str, Any] | None) -> None:
@@ -239,7 +72,7 @@ def render_operator_actions(hints: dict[str, Any] | None) -> None:
 	console.print()
 	for index, action in enumerate(actions):
 		prefix = "↓ 你需要：" if index == 0 else "　　　　　"
-		console.print(f"[yellow]{prefix}[/yellow]{escape_markup(action)}")
+		console.print(f"[yellow]{prefix}[/yellow]{action}")
 
 
 def handle_output(
@@ -268,28 +101,13 @@ def handle_error_output(
 	*,
 	code: str,
 	message: str,
-	recoverable: bool | None = None,
+	recoverable: bool = False,
 	recovery_action: str | None = None,
 	details: dict[str, Any] | None = None,
 	hints: dict[str, Any] | None = None,
 ) -> None:
 	"""Smart error output: TTY -> rich error, pipe -> JSON error envelope."""
 	from boss_agent_cli.output import emit_error
-
-	# 调用方未显式声明时按登记表补齐，TTY 与 JSON 两条路径看到同一份恢复契约。
-	registered_recoverable, registered_recovery_action = error_contract_for_code(code)
-	if recoverable is None:
-		recoverable = registered_recoverable
-	if recovery_action is None:
-		recovery_action = registered_recovery_action
-	if (
-		code in {"AUTH_REQUIRED", "AUTH_EXPIRED", "TOKEN_REFRESH_FAILED"}
-		and recoverable
-		and recovery_action == registered_recovery_action
-	):
-		# 登记表是无运行上下文的示例；只补齐通用登录动作，不覆盖写操作的人工核对要求。
-		recovery_action = login_action_for_ctx(ctx)
-		hints = {**auth_required_hints(ctx), **(hints or {})}
 
 	if is_json_mode(ctx):
 		emit_error(
@@ -302,15 +120,9 @@ def handle_error_output(
 			hints=hints,
 		)
 	else:
-		# JSON 路径由 output.py 脱敏；TTY 分支同样不能把异常文本里的凭据
-		# 明文打到终端（Issue #880）。
-		safe_message = redact_sensitive_text(message)
-		safe_recovery = redact_sensitive_text(recovery_action) if recovery_action else recovery_action
-		# 命令文本里可能带数据目录：方括号内容会被 Rich 当作样式标签吞掉，
-		# 未配对的闭合标签还会直接抛 MarkupError，恢复指引必须按字面显示。
-		console.print(f"[red]error[/red] [{code}] {escape(safe_message)}")
-		if safe_recovery:
-			console.print(f"  [dim]recovery: {escape(safe_recovery)}[/dim]")
+		console.print(f"[red]error[/red] [{code}] {message}")
+		if recovery_action:
+			console.print(f"  [dim]recovery: {recovery_action}[/dim]")
 		render_operator_actions(hints)
 		raise SystemExit(1)
 
@@ -335,19 +147,16 @@ def handle_platform_error_output(
 	response: Any,
 	*,
 	fallback_message: str,
-	extra_hints: dict[str, Any] | None = None,
+	unknown_error_code: str | None = None,
 ) -> None:
-	"""Emit a schema-backed error envelope for an unsuccessful platform response.
-
-	``extra_hints`` 承载命令自身的诊断字段（如 status 的 ``auth_health``）；
-	风控码的 ``next_actions`` 由 ``RISK_ERROR_CONTRACTS`` 覆盖，调用方不能改写。
-	``UNKNOWN`` 沿用登记表的「先核对、勿自动重试」契约：写命令曾把它改写成
-	可重试的 ``NETWORK_ERROR``，批量与 wizard 因此重放可能已生效的写操作
-	（Issue #990）。
-	"""
+	"""Emit a schema-backed error envelope for an unsuccessful platform response."""
 	code, message = platform.parse_error(response)
-	recoverable, recovery_action, risk_hints = platform_error_contract(code, ctx=ctx)
-	hints = {**(extra_hints or {}), **(risk_hints or {})} or None
+	if code == "UNKNOWN" and unknown_error_code is not None:
+		code = unknown_error_code
+	recoverable, recovery_action = error_contract_for_code(code)
+	hints = None
+	if code in RISK_ERROR_CONTRACTS:
+		recovery_action, hints = risk_error_contract(code)
 	details = None
 	if isinstance(response, dict):
 		error = response.get("error")
@@ -364,7 +173,7 @@ def handle_platform_error_output(
 		ctx,
 		command,
 		code=code,
-		message=platform_error_message(code, message, fallback_message),
+		message=message or fallback_message,
 		recoverable=recoverable,
 		recovery_action=recovery_action,
 		details=details,
@@ -381,13 +190,8 @@ def render_job_table(
 	*,
 	page: int = 1,
 	hint_next: str = "",
-	show_command: str | None = None,
 ) -> None:
-	"""渲染职位表。
-
-	``show_command`` 只在调用方已把这批职位写进编号索引时传入：`boss show <#>`
-	读的是索引而不是屏幕上的表格，没写索引的列表给出编号提示会打开另一条职位。
-	"""
+	"""Render a list of jobs as a rich table."""
 	if not items:
 		console.print("[yellow]no results[/yellow]")
 		return
@@ -405,46 +209,35 @@ def render_job_table(
 	for i, job in enumerate(items, 1):
 		table.add_row(
 			str(i),
-			escape_markup(job.get("title", job.get("jobName", "-"))),
-			escape_markup(job.get("company", job.get("brandName", "-"))),
-			escape_markup(job.get("salary", job.get("salaryDesc", "-"))),
-			escape_markup(job.get("employment_type") or "-"),
-			escape_markup(job.get("experience", job.get("jobExperience", "-"))),
-			escape_markup(job.get("education", job.get("jobDegree", "-"))),
-			escape_markup(job.get("city", job.get("cityName", "-"))),
+			job.get("title", job.get("jobName", "-")),
+			job.get("company", job.get("brandName", "-")),
+			job.get("salary", job.get("salaryDesc", "-")),
+			job.get("employment_type") or "-",
+			job.get("experience", job.get("jobExperience", "-")),
+			job.get("education", job.get("jobDegree", "-")),
+			job.get("city", job.get("cityName", "-")),
 		)
 
 	console.print(table)
-	if show_command:
-		console.print(f"  [dim]use: {escape(show_command)} to view details[/dim]")
+	console.print("  [dim]use: boss show <#> to view details[/dim]")
 	if hint_next:
-		console.print(f"  [dim]{escape(hint_next)}[/dim]")
-
-
-def _snapshot_time_label(value: Any) -> str:
-	"""把索引快照的 Unix 秒渲染成本地时间；损坏缓存里的非数值按 "-" 处理。"""
-	if isinstance(value, bool) or not isinstance(value, (int, float)):
-		return "-"
-	try:
-		return datetime.datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M")
-	except (OverflowError, OSError, ValueError):
-		return "-"
+		console.print(f"  [dim]{hint_next}[/dim]")
 
 
 def render_job_detail(data: dict[str, Any], *, greet_command: str | None = None) -> None:
 	"""Render job detail as a rich panel."""
-	title = escape_markup(data.get("title", "-"))
-	salary = escape_markup(data.get("salary", "-"))
-	exp = escape_markup(data.get("experience", "-"))
-	edu = escape_markup(data.get("education", "-"))
-	city = escape_markup(data.get("city", "-"))
-	company = escape_markup(data.get("company", "-"))
-	boss = escape_markup(data.get("boss_name", "-"))
-	boss_title = escape_markup(data.get("boss_title", "-"))
-	desc = str(data.get("description", ""))
+	title = data.get("title", "-")
+	salary = data.get("salary", "-")
+	exp = data.get("experience", "-")
+	edu = data.get("education", "-")
+	city = data.get("city", "-")
+	company = data.get("company", "-")
+	boss = data.get("boss_name", "-")
+	boss_title = data.get("boss_title", "-")
+	desc = data.get("description", "")
 
 	skills = data.get("skills", [])
-	skill_str = ", ".join(escape_markup(skill) for skill in skills) if skills else "-"
+	skill_str = ", ".join(skills) if skills else "-"
 
 	text = (
 		f"[bold cyan]{title}[/bold cyan]  [yellow]{salary}[/yellow]\n"
@@ -459,44 +252,29 @@ def render_job_detail(data: dict[str, Any], *, greet_command: str | None = None)
 	if desc:
 		if len(desc) > 500:
 			desc = desc[:500] + "..."
-		# 先截断再转义：截断可能落在转义序列中间。
-		text += f"\n[bold]description:[/bold]\n{escape_markup(desc)}"
+		text += f"\n[bold]description:[/bold]\n{desc}"
 
 	panel = Panel(text, title="job detail", border_style="cyan")
 	console.print(panel)
-
-	# 编号绑定的是索引快照，不是职位本身：把来源和保存时间放在详情下方，
-	# 重搜之后一眼就能看出这条编号是不是已经指向另一次搜索。
-	snapshot = data.get("index_snapshot")
-	if isinstance(snapshot, dict):
-		source = escape(str(snapshot.get("source") or "-"))
-		count = snapshot.get("count")
-		count_label = str(count) if isinstance(count, int) and not isinstance(count, bool) else "-"
-		page = snapshot.get("page")
-		page_label = f"第 {page} 页 · " if isinstance(page, int) and not isinstance(page, bool) else ""
-		index = data.get("index", "-")
-		console.print(
-			f"  [dim]#{index} · {page_label}{source} · 共 {count_label} 条 · 保存于 {_snapshot_time_label(snapshot.get('saved_at'))}[/dim]"
-		)
 
 	sid = data.get("security_id", "")
 	jid = data.get("job_id", "")
 	if sid and jid:
 		greet_command = greet_command or "boss greet <security_id> <job_id>"
-		console.print(f"  [dim]next: {escape(greet_command)}[/dim]")
+		console.print(f"  [dim]next: {greet_command}[/dim]")
 
 
 def render_status(data: dict[str, Any], *, login_action: str = "boss login") -> None:
 	"""Render login status."""
 	if data.get("logged_in"):
-		name = escape_markup(data.get("user_name", "unknown"))
+		name = data.get("user_name", "unknown")
 		console.print(f"[green]logged in[/green] as [bold]{name}[/bold]")
 	else:
 		console.print(f"[yellow]not logged in[/yellow] - run: {login_action}")
 	lock = data.get("cdp_risk_lock")
 	if isinstance(lock, dict) and lock.get("locked"):
-		since = escape_markup(lock.get("locked_at") or "unknown")
-		reason = escape_markup(lock.get("reason") or "ENVIRONMENT_RISK")
+		since = lock.get("locked_at") or "unknown"
+		reason = lock.get("reason") or "ENVIRONMENT_RISK"
 		console.print(
 			f"[yellow]BOSS 本地风控锁定中[/yellow]（{since} 起，{reason}）：确认官方目标业务页已恢复后，"
 			"由用户执行 boss clean --risk-lock 再显式恢复任务；令牌变化不会自动解锁"
@@ -524,7 +302,7 @@ def render_simple_list(
 	for i, item in enumerate(items, 1):
 		row = [str(i)]
 		for _, key, _ in columns:
-			row.append(escape_markup(item.get(key, "-")))
+			row.append(str(item.get(key, "-")))
 		table.add_row(*row)
 
 	console.print(table)
@@ -537,7 +315,7 @@ def render_message_panel(data: dict[str, Any], *, title: str = "result") -> None
 	"""Render a simple key-value result as a panel."""
 	lines = []
 	for k, v in data.items():
-		lines.append(f"[bold]{escape_markup(k)}:[/bold] {escape_markup(v)}")
+		lines.append(f"[bold]{k}:[/bold] {v}")
 	panel = Panel("\n".join(lines), title=title, border_style="green")
 	console.print(panel)
 
@@ -561,10 +339,10 @@ def render_batch_operation_summary(data: dict[str, Any], *, title: str = "batch 
 		table.add_column("title", style="cyan", max_width=25)
 		table.add_column("company", style="green", max_width=20)
 		for item in greeted:
-			table.add_row(escape_markup(item.get("title", "-")), escape_markup(item.get("company", "-")))
+			table.add_row(item.get("title", "-"), item.get("company", "-"))
 		console.print(table)
 	if data.get("stopped_reason"):
-		console.print(f"  [yellow]stopped: {escape_markup(data['stopped_reason'])}[/yellow]")
+		console.print(f"  [yellow]stopped: {data['stopped_reason']}[/yellow]")
 
 
 def render_sectioned_record(data: dict[str, Any], *, title: str = "info") -> None:
@@ -575,11 +353,11 @@ def render_sectioned_record(data: dict[str, Any], *, title: str = "info") -> Non
 			for k, v in content.items():
 				if isinstance(v, (list, dict)):
 					v = str(v)[:200]
-				lines.append(f"[bold]{escape_markup(k)}:[/bold] {escape_markup(v or '-')}")
+				lines.append(f"[bold]{k}:[/bold] {v or '-'}")
 			panel = Panel("\n".join(lines) if lines else "[dim]empty[/dim]", title=section, border_style="cyan")
 			console.print(panel)
 		else:
-			console.print(f"[bold]{escape_markup(section)}:[/bold] {escape_markup(content)}")
+			console.print(f"[bold]{section}:[/bold] {content}")
 
 
 def render_string_grid(items: list[str], title: str, *, columns: int = 4) -> None:
@@ -596,7 +374,7 @@ def render_string_grid(items: list[str], title: str, *, columns: int = 4) -> Non
 		row = items[i : i + columns]
 		while len(row) < columns:
 			row.append("")
-		table.add_row(*[escape_markup(item) for item in row])
+		table.add_row(*row)
 
 	console.print(table)
 
@@ -607,11 +385,9 @@ def render_export_summary(data: dict[str, Any]) -> None:
 	count = data.get("count", 0)
 	fmt = data.get("format", "")
 	if path:
-		console.print(f"[green]exported[/green] {count} jobs to [bold]{escape_markup(path)}[/bold] ({escape_markup(fmt)})")
+		console.print(f"[green]exported[/green] {count} jobs to [bold]{path}[/bold] ({fmt})")
 	else:
 		console.print(f"[green]exported[/green] {count} jobs ({fmt})")
-	if data.get("truncated"):
-		console.print("[yellow]注意：扫描到内部页数上限，结果可能不完整[/yellow]")
 
 
 def render_next_steps(actions: "Sequence[str] | None") -> None:
@@ -628,9 +404,7 @@ def render_next_steps(actions: "Sequence[str] | None") -> None:
 		return
 	console.print("\n  [bold]下一步：[/bold]")
 	for action in actions:
-		# 命令里带数据目录等用户可控文本：不转义时 `[bold]` 会被 Rich 吞掉，
-		# 未配对的 `[/bold]` 直接抛 MarkupError，整个人工提示都打不出来。
-		console.print(f"    [dim]{escape(action)}[/dim]")
+		console.print(f"    [dim]{action}[/dim]")
 
 
 def render_action_result(
@@ -808,122 +582,19 @@ RISK_ERROR_CONTRACTS: dict[str, dict[str, Any]] = {
 		"next_actions": [
 			"不要刷新 Token、重新登录或换通道重试；本次请求未发出",
 			"由用户在原会话确认官方目标业务页恢复后，执行 boss clean --risk-lock 并显式恢复任务；令牌变化不放行",
-			"boss doctor",
+			"boss doctor — 查看本地风控锁状态",
 		],
 	},
 }
 
 
-#: 契约文案里的注释性命令（默认示例）。有运行上下文时由调用方替换成带
-#: ``--data-dir`` 的真实命令：风险锁写在 ``<data_dir>/.cdp_risk_lock``。
-_RISK_CONTRACT_CLEAN = "boss clean --risk-lock"
-_RISK_CONTRACT_DOCTOR = "boss doctor"
-
-
-def _risk_contract_commands(
-	text: str,
-	clean_command: str | None,
-	doctor_command: str | None,
-) -> str:
-	"""把契约文本里的默认示例替换成调用方上下文中的命令（Issue #978）。"""
-	if clean_command:
-		text = text.replace(_RISK_CONTRACT_CLEAN, clean_command)
-	if doctor_command:
-		text = text.replace(_RISK_CONTRACT_DOCTOR, doctor_command)
-	return text
-
-
-def risk_error_contract(
-	code: str,
-	*,
-	ctx: Any = None,
-	clean_command: str | None = None,
-	doctor_command: str | None = None,
-) -> tuple[str, dict[str, list[str]]]:
-	"""Return ``(recovery_action, hints)`` for a platform risk error code.
-
-	有 ``ctx`` 的调用方得到带 ``--data-dir`` 与平台的 ``clean --risk-lock`` /
-	``doctor``；无上下文的纯函数调用与静态文档保持登记表的通用示例。
-	"""
+def risk_error_contract(code: str) -> tuple[str, dict[str, list[str]]]:
+	"""Return ``(recovery_action, hints)`` for a platform risk error code."""
 	spec = RISK_ERROR_CONTRACTS.get(code)
 	if spec is None:
 		_, recovery = error_contract_for_code(code, fallback_recovery_action="停止自动化访问")
 		return recovery or "停止自动化访问", {}
-	if ctx is not None:
-		if clean_command is None:
-			clean_command = boss_command_for_ctx(ctx, "clean --risk-lock", include_data_dir=True)
-		if doctor_command is None:
-			doctor_command = boss_command_for_ctx(ctx, "doctor", include_data_dir=True)
-	return (
-		_risk_contract_commands(str(spec["recovery_action"]), clean_command, doctor_command),
-		{
-			"next_actions": [
-				_risk_contract_commands(str(item), clean_command, doctor_command)
-				for item in spec["next_actions"]
-			]
-		},
-	)
-
-
-#: 浏览器来源策略表里的命令默认示例。有运行上下文时由调用方替换成带
-#: ``--data-dir`` 与平台的真实命令：``doctor`` 诊断的是本地登录态、缓存与风险锁。
-_BROWSER_POLICY_COMMANDS: dict[str, tuple[str, ...]] = {
-	"boss status --live": ("status --live",),
-	"boss doctor": ("doctor",),
-	"boss login --cdp": ("login --cdp",),
-	"boss clean --risk-lock": ("clean --risk-lock",),
-}
-
-
-def browser_policy_text(text: str, command_for: Callable[[str], str]) -> str:
-	"""把来源策略文案里的默认示例换成 ``command_for`` 构造的命令（Issue #980）。
-
-	``doctor`` / ``status --live`` / ``login --cdp`` / ``clean --risk-lock`` 读的是
-	``<data_dir>`` 里的登录态与风险锁；自定义 ``--data-dir`` 下照抄裸命令只会
-	诊断或清理默认目录。
-	"""
-	for literal, (command,) in _BROWSER_POLICY_COMMANDS.items():
-		if literal in text:
-			text = text.replace(literal, command_for(command))
-	return text
-
-
-def browser_policy_text_for_ctx(ctx: Any, text: str) -> str:
-	"""带数据目录与平台的来源策略文案；无上下文的纯函数调用保持原文。"""
-	if not text:
-		return text
-	return browser_policy_text(
-		text, lambda command: boss_command_for_ctx(ctx, command, include_data_dir=True)
-	)
-
-
-def httpx_only_fallback_hint(ctx: Any) -> list[str]:
-	"""``--browser-source httpx-only`` 失败时给真人的回退指引。
-
-	该来源的线上稳定性尚未证实（同一天内既有成功也有 code 37），所以失败时的
-	第一建议不是重试，而是回到默认的浏览器通道——那是本项目一直在用的路径。
-	"""
-	browser_source = (getattr(ctx, "obj", None) or {}).get("browser_source")
-	if browser_source != "httpx-only":
-		return []
-	return [
-		"httpx-only 的线上稳定性未证实；失败后先回退到默认 --browser-source auto 再试",
-		"若已命中风控，按提示保留 checkpoint，不要靠切换通道绕过",
-	]
-
-
-def _with_httpx_only_hint(ctx: Any, hints: dict[str, list[str]] | None) -> dict[str, list[str]] | None:
-	extra = httpx_only_fallback_hint(ctx)
-	if not extra:
-		return hints
-	merged = dict(hints or {})
-	merged["operator_actions"] = [*merged.get("operator_actions", []), *extra]
-	return merged
-
-
-# 解析平台数据或 CLI 自身的缺陷：同样的输入必然得到同样的结果。归为 NETWORK_ERROR
-# 并建议「重试」会让 Agent 反复重试，重试的若是平台请求，还会白白消耗请求预算。
-INTERNAL_ERROR_TYPES: tuple[type[Exception], ...] = (TypeError, AttributeError, KeyError, IndexError, OverflowError)
+	return str(spec["recovery_action"]), {"next_actions": list(spec["next_actions"])}
 
 
 def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -939,7 +610,7 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 	def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
 		@wraps(func)
 		def wrapper(ctx: Any, *args: Any, **kwargs: Any) -> Any:
-			from boss_agent_cli.api.browser_client import BrowserNavigationError, RecruiterChatTabRequired
+			from boss_agent_cli.api.browser_client import RecruiterChatTabRequired
 			from boss_agent_cli.api._base_client import BrowserChannelRequired
 			from boss_agent_cli.api.browser_source import BrowserSourceUnavailable, BrowserSourceUnsupported
 			from boss_agent_cli.api.client import PlatformRiskError
@@ -966,25 +637,18 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 					},
 				)
 			except BrowserSourceUnavailable as e:
-				# 策略表是来源耗尽时的唯一文案真源，但表本身没有运行上下文：
-				# 其中内嵌的 doctor / status --live / login --cdp / clean --risk-lock
-				# 读的是 <data_dir> 里的登录态与风险锁，这里补上本次目录与平台（Issue #980）。
 				hints: dict[str, list[str]] = {}
 				if e.policy.operator_actions:
-					hints["operator_actions"] = [
-						browser_policy_text_for_ctx(ctx, action) for action in e.policy.operator_actions
-					]
+					hints["operator_actions"] = list(e.policy.operator_actions)
 				if e.policy.next_actions:
-					hints["next_actions"] = [
-						browser_policy_text_for_ctx(ctx, action) for action in e.policy.next_actions
-					]
+					hints["next_actions"] = list(e.policy.next_actions)
 				handle_error_output(
 					ctx,
 					command_name,
 					code=e.code,
 					message=str(e),
 					recoverable=True,
-					recovery_action=browser_policy_text_for_ctx(ctx, e.policy.recovery_action),
+					recovery_action=e.policy.recovery_action,
 					hints=hints or None,
 				)
 			except BrowserChannelRequired as e:
@@ -1011,7 +675,7 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 					recoverable=True,
 					recovery_action="回到 BOSS 直聘官方招聘者页面手动处理",
 					hints={
-						"operator_actions": [
+						"next_actions": [
 							"在 BOSS 直聘官方页面确认候选人和沟通上下文",
 							"保持 CLI 默认低风险模式，不通过自动化链路发送消息或请求简历",
 						]
@@ -1026,7 +690,6 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 					message=f"未登录，请先执行 {login_action}",
 					recoverable=True,
 					recovery_action=login_action,
-					hints=auth_required_hints(ctx),
 				)
 			except TokenRefreshFailed:
 				login_action = login_action_for_ctx(ctx)
@@ -1037,20 +700,18 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 					message="Token 刷新失败，请重新登录",
 					recoverable=True,
 					recovery_action=login_action,
-					hints=auth_required_hints(ctx),
 				)
 			except PlatformRiskError as e:
-				recovery_action, hints = risk_error_contract(e.code, ctx=ctx)
+				recovery_action, hints = risk_error_contract(e.code)
 				handle_error_output(
 					ctx,
 					command_name,
 					code=e.code,
-					# 风控信封不透传平台响应文本（可能带临时凭据），只给登记表文案。
-					message=risk_error_message(e.code),
+					message=str(e),
 					recoverable=False,
 					recovery_action=recovery_action,
 					details=e.details or None,
-					hints=_with_httpx_only_hint(ctx, hints),
+					hints=hints or None,
 				)
 			except RequestBudgetExceeded as e:
 				budget_recoverable, budget_recovery = error_contract_for_code(e.code)
@@ -1062,76 +723,9 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 					recoverable=budget_recoverable,
 					recovery_action=budget_recovery,
 					details=e.details,
-					hints=_with_httpx_only_hint(
-						ctx, {"operator_actions": ["等待冷却并检查并发任务；确认后显式恢复，不自动清理风险锁"]}
-					),
+					hints={"operator_actions": ["等待冷却并检查并发任务；确认后显式恢复，不自动清理风险锁"]},
 				)
-			except BrowserNavigationError as e:
-				nav_recoverable, nav_recovery = error_contract_for_code(e.code)
-				handle_error_output(
-					ctx,
-					command_name,
-					code=e.code,
-					message=str(e),
-					recoverable=nav_recoverable,
-					recovery_action=nav_recovery,
-					details=e.details(),
-					hints={
-						"next_actions": [
-							boss_command_for_ctx(ctx, "doctor", include_data_dir=True),
-							login_action_for_ctx(ctx),
-						],
-						"operator_actions": [
-							"浏览器通道会先打开 https://www.zhipin.com/ 再请求接口；--url 只解析筛选条件，不会改走搜索页",
-							"首页在自动化下偶发加载卡住，CLI 已跳到空白页并重试。仍失败时，用带调试端口的 Chrome 打开官网并确认首页能加载，再执行 boss --cdp-url http://127.0.0.1:9222 <命令>",
-							"若 boss status 显示登录态 degraded 或 stoken 很久未更新，先执行 boss login",
-						],
-					},
-				)
-			except INTERNAL_ERROR_TYPES as e:
-				internal_recoverable, internal_recovery = error_contract_for_code("INTERNAL_ERROR")
-				handle_error_output(
-					ctx,
-					command_name,
-					code="INTERNAL_ERROR",
-					message=f"{command_name} 失败: {type(e).__name__}: {e}",
-					recoverable=internal_recoverable,
-					recovery_action=internal_recovery,
-				)
-			except OSError as e:
-				if is_browser_kernel_missing(str(e)):
-					# Playwright 以 OSError 子类抛「内核缺失」时同样不能被兜成可重试。
-					handle_browser_kernel_missing(ctx, command_name, e)
-				elif is_local_io_error(e):
-					# 路径不可写、目标被同名文件占用、磁盘满：重试同一条命令永远修不好，
-					# 落成可重试的 NETWORK_ERROR 只会让 Agent 无限重试。
-					handle_error_output(
-						ctx,
-						command_name,
-						code="LOCAL_IO_ERROR",
-						message=f"{command_name} 本地文件读写失败: {e}",
-					)
-				else:
-					handle_error_output(
-						ctx,
-						command_name,
-						code="NETWORK_ERROR",
-						message=f"{command_name} 失败: {e}",
-						recoverable=True,
-						recovery_action="重试",
-						hints=_with_httpx_only_hint(ctx, None),
-					)
-			except click.ClickException:
-				# 命令体里抛出的参数校验（如 mark 的 --label）仍是用法错误：交给
-				# BossCliGroup 出 INVALID_PARAM 信封，不能兜成「可重试的 NETWORK_ERROR」，
-				# 否则 Agent 会拿同一个非法值反复重试。
-				raise
 			except Exception as e:
-				# 内核缺失是确定性失败：符号名 / 路径未变时重试永远同一结果，不能
-				# 兜成 NETWORK_ERROR +「重试」让 Agent 反复打平台。
-				if is_browser_kernel_missing(str(e)):
-					handle_browser_kernel_missing(ctx, command_name, e)
-					return
 				handle_error_output(
 					ctx,
 					command_name,
@@ -1139,7 +733,6 @@ def handle_auth_errors(command_name: str) -> Callable[[Callable[..., Any]], Call
 					message=f"{command_name} 失败: {e}",
 					recoverable=True,
 					recovery_action="重试",
-					hints=_with_httpx_only_hint(ctx, None),
 				)
 
 		return wrapper

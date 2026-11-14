@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from boss_agent_cli.cache.store import CacheStore
-from boss_agent_cli.display import boss_command, shell_argument
 
 _PUBLIC_JOB_FIELDS = {
 	"query", "page", "rank", "title", "salary", "city", "district", "business_district",
@@ -19,22 +17,13 @@ def _public_job(payload: dict[str, Any]) -> dict[str, Any]:
 	return {key: value for key, value in payload.items() if key in _PUBLIC_JOB_FIELDS}
 
 
-def crawl_status(cache: CacheStore, run_id: str, *, data_dir: Path | None = None) -> dict[str, Any]:
+def crawl_status(cache: CacheStore, run_id: str) -> dict[str, Any]:
 	"""Return one run's checkpoint and detail progress without opening Chrome."""
 	run = cache.get_crawl_run(run_id)
 	if run is None:
 		raise KeyError(run_id)
 	jobs = cache.list_crawl_jobs(run_id)
 	details_completed = sum(1 for item in jobs if item["detail_done"])
-	checkpoint: dict[str, Any] = {
-		"next_page": run["next_page"],
-		"resume_command": boss_command(f"crawl resume {shell_argument(run_id)}", data_dir=data_dir),
-	}
-	if run["status"] == "risk_stopped":
-		# 风险锁会先于浏览器构造阻断 resume（raise_if_locked）。这里只标记前置条件，
-		# 不把解锁命令写进机器可执行的 resume_command：风险锁必须由用户确认官方
-		# 页面恢复后显式解除。
-		checkpoint["resume_requires_operator_unlock"] = True
 	return {
 		"run_id": run_id,
 		"status": run["status"],
@@ -55,7 +44,10 @@ def crawl_status(cache: CacheStore, run_id: str, *, data_dir: Path | None = None
 		"output_dir": run["output_dir"],
 		"error": run["error"],
 		"hooks": run["hook_results"],
-		"checkpoint": checkpoint,
+		"checkpoint": {
+			"next_page": run["next_page"],
+			"resume_command": f"boss crawl resume {run_id}",
+		},
 	}
 
 
@@ -102,11 +94,7 @@ def import_crawl_shortlist(
 	tags: tuple[str, ...] = (),
 	note: str = "",
 ) -> dict[str, Any]:
-	"""Import selected crawl rows into the existing shortlist without overwrites.
-
-	Dedupe by the stable ``job_id``: ``security_id`` rotates on every search
-	response, so a composite key lets a re-crawled job in as a second row.
-	"""
+	"""Import selected crawl rows into the existing shortlist without overwrites."""
 	if include_all == bool(selectors):
 		raise ValueError("必须且只能使用 --all 或至少一个 --selector 选择要导入的职位")
 	if len(selectors) != len(set(selectors)):
@@ -125,10 +113,10 @@ def import_crawl_shortlist(
 	if missing_selectors:
 		raise ValueError(f"run {run_id} 中不存在 selector: {', '.join(missing_selectors)}")
 
-	# security_id 每次搜索请求都会轮换，不能参与跨 run 去重：同一职位重新采集后
-	# 再次导入会带着新值，复合键永远对不上，候选池里就多出一条重复记录。只按稳定
-	# 的 job_id 判断是否已存在；命中时保留已有标签、备注和首次加入时间（Issue #899）。
-	known_job_ids = {str(item.get("job_id", "")) for item in cache.list_shortlist()}
+	existing_keys = {
+		(str(item.get("security_id", "")), str(item.get("job_id", "")))
+		for item in cache.list_shortlist()
+	}
 	imported: list[dict[str, str]] = []
 	existing_count = 0
 	skipped_count = 0
@@ -139,7 +127,7 @@ def import_crawl_shortlist(
 		if not security_id or not job_id:
 			skipped_count += 1
 			continue
-		if job_id in known_job_ids:
+		if (security_id, job_id) in existing_keys:
 			existing_count += 1
 			continue
 		cache.add_shortlist({
@@ -154,7 +142,6 @@ def import_crawl_shortlist(
 			"note": note,
 		})
 		imported.append({"selector": str(selected_item["selector"]), "title": str(item.get("title", ""))})
-		known_job_ids.add(job_id)
 	return {
 		"run_id": run_id,
 		"selected_count": len(selected),

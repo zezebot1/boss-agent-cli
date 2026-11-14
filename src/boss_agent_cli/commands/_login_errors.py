@@ -3,13 +3,7 @@
 import click
 
 from boss_agent_cli.api.client import PlatformRiskError
-from boss_agent_cli.display import (
-	boss_command_for_ctx,
-	login_action_for_ctx,
-	risk_error_contract,
-	risk_error_message,
-)
-from boss_agent_cli.services.browser_runtime import is_browser_kernel_missing, patchright_install_command
+from boss_agent_cli.display import boss_command_for_ctx, login_action_for_ctx, risk_error_contract
 
 
 def classify_login_error(exc: Exception, ctx: click.Context) -> dict[str, object]:
@@ -26,8 +20,8 @@ def classify_login_error(exc: Exception, ctx: click.Context) -> dict[str, object
 	message = raw_message.lower()
 	recovery_action = login_action_for_ctx(ctx)
 	login_cmd = login_action_for_ctx(ctx)
-	status_cmd = boss_command_for_ctx(ctx, "status", include_data_dir=True)
-	doctor_cmd = boss_command_for_ctx(ctx, "doctor", include_data_dir=True)
+	status_cmd = boss_command_for_ctx(ctx, "status")
+	doctor_cmd = boss_command_for_ctx(ctx, "doctor")
 
 	def payload(
 		code: str,
@@ -49,11 +43,10 @@ def classify_login_error(exc: Exception, ctx: click.Context) -> dict[str, object
 
 	if isinstance(exc, PlatformRiskError):
 		# 复用登录态的只读探测命中风控：与其他命令共用同一份终止契约，不建议重试登录。
-		recovery, hints = risk_error_contract(exc.code, ctx=ctx)
+		recovery, hints = risk_error_contract(exc.code)
 		return {
 			"code": exc.code,
-			# 风控信封不透传平台响应文本（可能带临时凭据），只给登记表文案。
-			"message": risk_error_message(exc.code),
+			"message": raw_message,
 			"recoverable": False,
 			"recovery_action": recovery,
 			"hints": hints or None,
@@ -81,14 +74,13 @@ def classify_login_error(exc: Exception, ctx: click.Context) -> dict[str, object
 			],
 		)
 
-	if is_browser_kernel_missing(message):
-		install_command = patchright_install_command()
+	if "executable doesn't exist" in message or "playwright was just installed" in message:
 		return payload(
 			"BROWSER_KERNEL_MISSING",
 			f"patchright 浏览器内核缺失或与所需修订版不匹配: {raw_message}",
-			[install_command, doctor_cmd, login_cmd],
+			["patchright install chromium", doctor_cmd, login_cmd],
 			["浏览器内核安装完成后重新执行登录"],
-			recovery=install_command,
+			recovery="patchright install chromium",
 		)
 
 	if "cdp" in message or "chrome" in message or isinstance(exc, ConnectionError):

@@ -15,21 +15,16 @@ from rich.table import Table
 from boss_agent_cli import display
 from boss_agent_cli.api.cdp_risk_lock import lock_path
 from boss_agent_cli.api.request_budget import budget_directory
-from boss_agent_cli.cache.store import CacheDatabaseInvalid
-from boss_agent_cli.display import boss_command_for_ctx, handle_output, render_next_steps, shell_argument
+from boss_agent_cli.display import handle_output, render_next_steps
 
 
 @click.command("clean")
 @click.option("--dry-run", is_flag=True, default=False, help="仅预览将清理的内容，不实际删除")
 @click.option(
-	"--all", "clean_all", is_flag=True, default=False,
-	help="清理全部缓存（包括未过期的搜索缓存、打招呼/投递记录、招聘者打招呼记录、职位描述缓存和工作地点发送记录）",
+	"--all", "clean_all", is_flag=True, default=False, help="清理全部缓存（包括未过期的搜索缓存和打招呼记录）"
 )
 @click.option("--privacy", is_flag=True, default=False, help="清理本地敏感数据（登录会话、简历、聊天快照和导出文件）")
-# 负数会让 cutoff 落到未来（time.time() - days * 86400），目录里所有文件都算「过期」，
-# 一次 `clean --days -1` 就把聊天快照和导出全部删掉。上限 100 年则挡住整数溢出：
-# 天数要转成 float，10**400 这类无界整数会抛 OverflowError 而不是给出信封。
-@click.option("--days", default=30, type=click.IntRange(0, 36500), help="清理超过指定天数的快照和导出文件")
+@click.option("--days", default=30, help="清理超过指定天数的快照和导出文件")
 @click.option(
 	"--risk-lock",
 	"risk_lock",
@@ -43,13 +38,6 @@ def clean_cmd(ctx: click.Context, dry_run: bool, clean_all: bool, privacy: bool,
 	data_dir = ctx.obj["data_dir"]
 	results = []
 	total_freed = 0
-
-	# 库文件存在但读不动时，先在这里失败：main.py 会把 CacheDatabaseInvalid 转成
-	# CACHE_DATABASE_INVALID 信封。否则 --privacy 会先删掉登录态和简历，再在
-	# sqlite 里抛 traceback，用户既看不到信封，也不知道哪些文件已经删了。
-	db_path = data_dir / "cache" / "boss_agent.db"
-	if db_path.exists():
-		_open_cache_db(db_path).close()
 
 	# 0) 本地风险锁：显式 opt-in，文件名及 target 标签沿用历史协议，不连浏览器。
 	if risk_lock:
@@ -103,20 +91,8 @@ def clean_cmd(ctx: click.Context, dry_run: bool, clean_all: bool, privacy: bool,
 		results.append({"target": "打招呼记录", "cleaned": count, "bytes_freed": freed})
 		total_freed += freed
 
-		freed, count = _clean_recruiter_greet_records(data_dir, dry_run=dry_run)
-		results.append({"target": "招聘者打招呼记录", "cleaned": count, "bytes_freed": freed})
-		total_freed += freed
-
 		freed, count = _clean_apply_records(data_dir, dry_run=dry_run)
 		results.append({"target": "投递记录", "cleaned": count, "bytes_freed": freed})
-		total_freed += freed
-
-		freed, count = _clean_location_records(data_dir, dry_run=dry_run)
-		results.append({"target": "工作地点发送记录", "cleaned": count, "bytes_freed": freed})
-		total_freed += freed
-
-		freed, count = _clean_job_desc_cache(data_dir, dry_run=dry_run)
-		results.append({"target": "职位描述缓存", "cleaned": count, "bytes_freed": freed})
 		total_freed += freed
 
 	data = {
@@ -131,35 +107,20 @@ def clean_cmd(ctx: click.Context, dry_run: bool, clean_all: bool, privacy: bool,
 			"platform_risk_status": "unverified",
 		}
 
-	hint_prefix = boss_command_for_ctx(ctx, f"--data-dir {shell_argument(str(data_dir))}")
 	hints: dict[str, list[str]] = {"next_actions": []}
-	operator_actions: list[str] = []
 	if risk_lock:
-		operator_actions.append(
-			"本地清锁不解除服务器风险；请确认官方目标业务页已恢复，再由用户显式恢复原任务，若再次命中风险立即停止"
-		)
-	if dry_run:
-		clean_args = ["clean"]
-		if clean_all:
-			clean_args.append("--all")
-		if privacy:
-			clean_args.append("--privacy")
-		clean_args.extend(("--days", str(days)))
-		if risk_lock:
-			clean_args.append("--risk-lock")
-		clean_action = f"{hint_prefix} {' '.join(clean_args)}"
-		if risk_lock:
-			operator_actions.append(f"预演未解除锁；确认恢复后由用户执行 {clean_action}")
-		else:
-			hints["next_actions"].append(clean_action)
+		hints["operator_actions"] = [
+			"本地清锁不解除服务器风险；请确认官方目标业务页已恢复，再由用户显式恢复原任务，若再次命中风险立即停止",
+		]
+	if dry_run and risk_lock:
+		hints["operator_actions"].append("预演未解除锁；确认恢复后由用户执行 boss clean --risk-lock")
+	elif dry_run:
+		hints["next_actions"].append("boss clean — 执行实际清理")
 	elif privacy:
-		hints["next_actions"].append(f"{hint_prefix} login")
-		hints["next_actions"].append(f"{hint_prefix} doctor")
-		operator_actions.append("隐私清理会清除本地登录态，需要重新登录后再继续")
+		hints["next_actions"].append("boss login — 隐私清理后需要重新登录")
+		hints["next_actions"].append("boss doctor — 检查清理后环境状态")
 	else:
-		hints["next_actions"].append(f"{hint_prefix} doctor")
-	if operator_actions:
-		hints["operator_actions"] = operator_actions
+		hints["next_actions"].append("boss doctor — 检查清理后环境状态")
 
 	handle_output(
 		ctx,
@@ -198,36 +159,14 @@ def _human_bytes(value: int) -> str:
 	return f"{size:.1f} GB"
 
 
-def _open_cache_db(db_path: Path) -> sqlite3.Connection:
-	"""打开缓存库，并把 sqlite3.DatabaseError 归一成 CacheDatabaseInvalid。
-
-	clean 直接操作 SQLite，不经过 CacheStore 的启动校验；库文件损坏时若把
-	DatabaseError 抛给顶层，只会得到 traceback 而不是信封。
-	"""
-	try:
-		conn = sqlite3.connect(str(db_path))
-		conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
-	except sqlite3.DatabaseError as exc:
-		raise CacheDatabaseInvalid(db_path, str(exc)) from exc
-	return conn
-
-
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-	"""旧版本数据目录可能缺少后加的表，按「没有可清理项」处理而不是报错。"""
-	row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
-	return row is not None
-
-
 def _clean_search_cache(data_dir: Path, *, dry_run: bool, clean_all: bool) -> tuple[int, int]:
 	"""清理搜索缓存，返回 (释放字节数, 清理条数)。"""
 	db_path = data_dir / "cache" / "boss_agent.db"
 	if not db_path.exists():
 		return 0, 0
 
-	conn = _open_cache_db(db_path)
+	conn = sqlite3.connect(str(db_path))
 	try:
-		if not _table_exists(conn, "search_cache"):
-			return 0, 0
 		if clean_all:
 			row = conn.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(response)), 0) FROM search_cache").fetchone()
 		else:
@@ -313,28 +252,9 @@ def _clean_greet_records(data_dir: Path, *, dry_run: bool) -> tuple[int, int]:
 	return _clean_table(data_dir, "greet_records", dry_run=dry_run)
 
 
-def _clean_recruiter_greet_records(data_dir: Path, *, dry_run: bool) -> tuple[int, int]:
-	"""清理招聘者打招呼记录；与求职者侧 greet_records 对称。"""
-	return _clean_table(data_dir, "recruiter_greet_records", dry_run=dry_run)
-
-
 def _clean_apply_records(data_dir: Path, *, dry_run: bool) -> tuple[int, int]:
 	"""清理投递记录。"""
 	return _clean_table(data_dir, "apply_records", dry_run=dry_run)
-
-
-def _clean_location_records(data_dir: Path, *, dry_run: bool) -> tuple[int, int]:
-	"""清理招聘者工作地点发送记录。"""
-	return _clean_table(data_dir, "recruiter_location_records", dry_run=dry_run)
-
-
-def _clean_job_desc_cache(data_dir: Path, *, dry_run: bool) -> tuple[int, int]:
-	"""清理职位描述缓存。
-
-	``get_job_desc()`` 只在命中过期条目时懒删除，冷门职位写入后没有任何
-	出口；``--all`` 是唯一能整体回收这部分空间的路径。
-	"""
-	return _clean_table(data_dir, "job_desc_cache", dry_run=dry_run)
 
 
 def _clean_crawl_data(data_dir: Path, *, dry_run: bool) -> tuple[int, int]:
@@ -342,16 +262,14 @@ def _clean_crawl_data(data_dir: Path, *, dry_run: bool) -> tuple[int, int]:
 	db_path = data_dir / "cache" / "boss_agent.db"
 	if not db_path.exists():
 		return files_size, files_count
-	conn = _open_cache_db(db_path)
+	conn = sqlite3.connect(str(db_path))
 	try:
-		if not _table_exists(conn, "crawl_runs"):
-			return files_size, files_count
 		row = conn.execute("SELECT COUNT(*) FROM crawl_runs").fetchone()
 		count = int(row[0])
 		if not dry_run:
-			for table in ("crawl_jobs", "crawl_runs", "crawl_budget"):
-				if _table_exists(conn, table):
-					conn.execute(f"DELETE FROM {table}")  # noqa: S608 - 表名来自固定白名单
+			conn.execute("DELETE FROM crawl_jobs")
+			conn.execute("DELETE FROM crawl_runs")
+			conn.execute("DELETE FROM crawl_budget")
 			conn.commit()
 		return files_size + count * 200, files_count + count
 	finally:
@@ -364,10 +282,8 @@ def _clean_table(data_dir: Path, table: str, *, dry_run: bool) -> tuple[int, int
 	if not db_path.exists():
 		return 0, 0
 
-	conn = _open_cache_db(db_path)
+	conn = sqlite3.connect(str(db_path))
 	try:
-		if not _table_exists(conn, table):
-			return 0, 0
 		row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
 		count = row[0]
 		estimated_size = count * 100

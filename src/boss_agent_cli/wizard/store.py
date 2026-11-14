@@ -2,30 +2,17 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from boss_agent_cli.cache.store import CacheRecordInvalid, CacheStore
-from boss_agent_cli.services.file_lock import exclusive_file_lock, run_lock_path
+from boss_agent_cli.cache.store import CacheStore
 from boss_agent_cli.wizard.models import WorkflowPlan
 
 
 class WorkflowStore:
 	def __init__(self, data_dir: Path) -> None:
 		self._cache = CacheStore(data_dir / "cache" / "boss_agent.db")
-		self._lock_dir = data_dir / "cache" / "workflow-locks"
-		self._corrupt_run_ids: list[str] = []
-
-	def execution_lock(self, run_id: str) -> AbstractContextManager[bool]:
-		"""同一 run 的执行权：跨进程独占、不等待，进程退出时由操作系统释放。
-
-		只约束「执行步骤」。状态查询与 stop 请求不取这把锁，执行期间照常可用；
-		不同 run 各用各的锁文件，互不阻塞。文件名取 run_id 的摘要，调用方传入
-		的任意字符串都不会变成路径的一部分。
-		"""
-		return exclusive_file_lock(run_lock_path(self._lock_dir, run_id))
 
 	def create(self, run_id: str, plan: WorkflowPlan) -> None:
 		self._cache.create_workflow_run(
@@ -51,27 +38,16 @@ class WorkflowStore:
 	def list_recent(self, *, limit: int = 20) -> list[dict[str, Any]]:
 		from boss_agent_cli.wizard.live_crawl import (
 			LIST_ENRICH_JOB_LIMIT,
-			enrich_run_with_live_crawl,
+			enrich_runs_with_live_crawl,
 			sort_runs_for_status_picker,
 		)
 
-		runs, corrupt = self._cache.list_workflow_runs_with_corrupt(limit=limit)
-		enriched: list[dict[str, Any]] = []
+		runs = self._cache.list_workflow_runs(limit=limit)
 		for run in runs:
-			run_id = str(run["run_id"])
-			try:
-				run["steps"] = self._cache.list_workflow_steps(run_id)
-				# 绑定的 crawl 记录写坏时同样读不出状态，与 run 本体损坏同等对待。
-				enriched.append(enrich_run_with_live_crawl(run, self._cache, job_limit=LIST_ENRICH_JOB_LIMIT))
-			except CacheRecordInvalid:
-				corrupt.append(run_id)
-		self._corrupt_run_ids = corrupt
+			run["steps"] = self._cache.list_workflow_steps(str(run["run_id"]))
+		# List menu: counts + sample titles only — no full 75-row dump.
+		enriched = enrich_runs_with_live_crawl(runs, self._cache, job_limit=LIST_ENRICH_JOB_LIMIT)
 		return sort_runs_for_status_picker(enriched)
-
-	@property
-	def corrupt_run_ids(self) -> list[str]:
-		"""上一次 list_recent 跳过的损坏 run_id（读不出断点，只能重建）。"""
-		return list(self._corrupt_run_ids)
 
 	@property
 	def cache(self) -> CacheStore:
@@ -85,10 +61,6 @@ class WorkflowStore:
 
 	def update_step(self, run_id: str, step_name: str, **kwargs: Any) -> bool:
 		return self._cache.update_workflow_step(run_id, step_name, **kwargs)
-
-	def set_step_error(self, run_id: str, step_name: str, error: dict[str, Any] | None) -> bool:
-		"""只改步骤的 error：状态、结果（含内部任务绑定）与时间戳保持原样。"""
-		return self._cache.set_workflow_step_error(run_id, step_name, error)
 
 	def request_stop(self, run_id: str) -> bool:
 		run = self.get(run_id)

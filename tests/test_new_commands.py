@@ -1,26 +1,9 @@
 """补齐缺失的命令测试：chatmsg / mark / exchange / detail / me / show / history / interviews / login / logout"""
 import json
-import shlex
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from click.testing import CliRunner
-import pytest
-
-from boss_agent_cli.display import error_contract_for_code, risk_error_contract, risk_error_message
 from boss_agent_cli.main import cli
-
-_DEFAULT_DATA_DIR = str((Path.home() / ".boss-agent").resolve())
-
-
-def _risk_recovery_for_default_dir(code: str) -> str:
-	"""风控停止契约的 recovery_action，解锁命令指向默认数据目录（Issue #978）。"""
-	return risk_error_contract(
-		code,
-		clean_command=f"boss --data-dir {_DEFAULT_DATA_DIR} clean --risk-lock",
-		doctor_command=f"boss --data-dir {_DEFAULT_DATA_DIR} doctor",
-	)[0]
-
 
 
 def _ctx_mock(mock_cls):
@@ -109,12 +92,12 @@ def test_chatmsg_not_found(mock_auth_cls, mock_client_cls):
 	result = runner.invoke(cli, ["chatmsg", "sec_nonexistent"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
+	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
 
 
 @patch("boss_agent_cli.commands.chatmsg.get_platform_instance")
 @patch("boss_agent_cli.commands.chatmsg.AuthManager")
-def test_chatmsg_not_found_after_second_page_keeps_contact_not_found(mock_auth_cls, mock_client_cls):
+def test_chatmsg_not_found_after_second_page_keeps_job_not_found(mock_auth_cls, mock_client_cls):
 	mock_client = _ctx_mock(mock_client_cls)
 	mock_client.friend_list.side_effect = [
 		_friend_list_response([_make_friend(sid="sec_other", uid=999)]),
@@ -124,7 +107,7 @@ def test_chatmsg_not_found_after_second_page_keeps_contact_not_found(mock_auth_c
 	result = runner.invoke(cli, ["chatmsg", "sec_nonexistent"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
+	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
 
 
 @patch("boss_agent_cli.commands.chatmsg.get_platform_instance")
@@ -164,7 +147,7 @@ def test_chatmsg_reports_friend_list_error(mock_auth_cls, mock_client_cls):
 	assert parsed["error"]["code"] == "TOKEN_REFRESH_FAILED"
 	assert parsed["error"]["message"] == "stoken expired"
 	assert parsed["error"]["recoverable"] is True
-	assert shlex.split(parsed["error"]["recovery_action"]) == ["boss", "--data-dir", _DEFAULT_DATA_DIR, "login"]
+	assert parsed["error"]["recovery_action"] == "boss login"
 
 
 @patch("boss_agent_cli.commands.chatmsg.get_platform_instance")
@@ -279,9 +262,9 @@ def test_mark_reports_error_when_platform_rejects(mock_auth_cls, mock_client_cls
 	parsed = json.loads(result.output)
 	assert parsed["ok"] is False
 	assert parsed["error"]["code"] == "ACCOUNT_RISK"
-	assert parsed["error"]["message"] == risk_error_message("ACCOUNT_RISK")
+	assert parsed["error"]["message"] == "account risk"
 	assert parsed["error"]["recoverable"] is False
-	assert parsed["error"]["recovery_action"] == _risk_recovery_for_default_dir("ACCOUNT_RISK")
+	assert parsed["error"]["recovery_action"] == "停止自动化访问，回到平台官网手动处理；确认目标业务页风险解除后，由用户执行 boss clean --risk-lock 并显式恢复任务，必要时联系客服"
 
 
 @patch("boss_agent_cli.commands.mark.get_platform_instance")
@@ -299,7 +282,7 @@ def test_mark_reports_friend_list_error(mock_auth_cls, mock_client_cls):
 	assert parsed["error"]["code"] == "TOKEN_REFRESH_FAILED"
 	assert parsed["error"]["message"] == "stoken expired"
 	assert parsed["error"]["recoverable"] is True
-	assert shlex.split(parsed["error"]["recovery_action"]) == ["boss", "--data-dir", _DEFAULT_DATA_DIR, "login"]
+	assert parsed["error"]["recovery_action"] == "boss login"
 
 
 @patch("boss_agent_cli.commands.mark.get_platform_instance")
@@ -311,12 +294,12 @@ def test_mark_not_found(mock_auth_cls, mock_client_cls):
 	result = runner.invoke(cli, ["mark", "sec_none", "--label", "收藏"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
+	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
 
 
 @patch("boss_agent_cli.commands.mark.get_platform_instance")
 @patch("boss_agent_cli.commands.mark.AuthManager")
-def test_mark_not_found_after_second_page_keeps_contact_not_found(mock_auth_cls, mock_client_cls):
+def test_mark_not_found_after_second_page_keeps_job_not_found(mock_auth_cls, mock_client_cls):
 	mock_client = _ctx_mock(mock_client_cls)
 	mock_client.friend_list.side_effect = [
 		_friend_list_response([_make_friend(sid="sec_other", uid=999)]),
@@ -326,7 +309,7 @@ def test_mark_not_found_after_second_page_keeps_contact_not_found(mock_auth_cls,
 	result = runner.invoke(cli, ["mark", "sec_none", "--label", "收藏"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
+	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
 
 
 @patch("boss_agent_cli.commands.mark.get_platform_instance")
@@ -398,7 +381,7 @@ def test_exchange_finds_contact_on_second_page(mock_auth_cls, mock_client_cls):
 
 @patch("boss_agent_cli.commands.exchange.get_platform_instance")
 @patch("boss_agent_cli.commands.exchange.AuthManager")
-def test_exchange_not_found_after_second_page_keeps_contact_not_found(mock_auth_cls, mock_client_cls):
+def test_exchange_not_found_after_second_page_keeps_job_not_found(mock_auth_cls, mock_client_cls):
 	mock_client = _ctx_mock(mock_client_cls)
 	mock_client.friend_list.side_effect = [
 		_friend_list_response([_make_friend(sid="sec_other", uid=999)]),
@@ -408,7 +391,7 @@ def test_exchange_not_found_after_second_page_keeps_contact_not_found(mock_auth_
 	result = runner.invoke(cli, ["exchange", "sec_none"])
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
+	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
 
 
 @patch("boss_agent_cli.commands.exchange.get_platform_instance")
@@ -456,9 +439,9 @@ def test_exchange_reports_friend_list_error(mock_auth_cls, mock_client_cls):
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "ACCOUNT_RISK"
-	assert parsed["error"]["message"] == risk_error_message("ACCOUNT_RISK")
+	assert parsed["error"]["message"] == "account risk"
 	assert parsed["error"]["recoverable"] is False
-	assert parsed["error"]["recovery_action"] == _risk_recovery_for_default_dir("ACCOUNT_RISK")
+	assert parsed["error"]["recovery_action"] == "停止自动化访问，回到平台官网手动处理；确认目标业务页风险解除后，由用户执行 boss clean --risk-lock 并显式恢复任务，必要时联系客服"
 
 
 @patch("boss_agent_cli.commands.exchange.get_platform_instance")
@@ -555,7 +538,7 @@ def test_detail_reports_platform_error(mock_auth_cls, mock_client_cls, mock_cach
 	assert parsed["error"]["code"] == "TOKEN_REFRESH_FAILED"
 	assert parsed["error"]["message"] == "stoken expired"
 	assert parsed["error"]["recoverable"] is True
-	assert shlex.split(parsed["error"]["recovery_action"]) == ["boss", "--data-dir", _DEFAULT_DATA_DIR, "login"]
+	assert parsed["error"]["recovery_action"] == "boss login"
 
 
 @patch("boss_agent_cli.commands.detail.CacheStore")
@@ -575,29 +558,6 @@ def test_detail_reports_not_supported_when_browser_fallback_missing(mock_auth_cl
 	assert parsed["error"]["message"] == "job_card is not supported"
 	assert parsed["error"]["recoverable"] is True
 	assert parsed["error"]["recovery_action"] == "切换平台或调整命令参数后重试"
-
-
-@patch("boss_agent_cli.commands.detail.CacheStore")
-@patch("boss_agent_cli.commands.detail.get_platform_instance")
-@patch("boss_agent_cli.commands.detail.AuthManager")
-def test_detail_empty_job_card_reports_not_found_with_next_steps(mock_auth_cls, mock_client_cls, mock_cache_cls):
-	"""「下架」不是死胡同：恢复指引与下一步必须能直接换线索。"""
-	mock_cache = _ctx_mock(mock_cache_cls)
-	mock_cache.is_greeted.return_value = False
-	mock_cache.get_job_id.return_value = ""
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.job_card.return_value = {"zpData": {"jobCard": {}}}
-	mock_client.unwrap_data.return_value = {"jobCard": {}}
-	runner = CliRunner()
-	result = runner.invoke(cli, ["detail", "sec_001"])
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "JOB_NOT_FOUND"
-	assert parsed["error"]["recovery_action"]
-	assert parsed["hints"]["next_actions"] == [
-		f"boss --data-dir {_DEFAULT_DATA_DIR} search <关键词>",
-		f"boss --data-dir {_DEFAULT_DATA_DIR} recommend",
-	]
 
 
 @patch("boss_agent_cli.commands.detail.CacheStore")
@@ -667,121 +627,18 @@ def test_show_reports_not_supported_when_job_card_missing(mock_auth_cls, mock_cl
 
 @patch("boss_agent_cli.commands.me.get_platform_instance")
 @patch("boss_agent_cli.commands.me.AuthManager")
-def test_me_basic(mock_auth_cls, mock_client_cls, tmp_path):
+def test_me_basic(mock_auth_cls, mock_client_cls):
 	mock_client = _ctx_mock(mock_client_cls)
 	mock_client.user_info.return_value = {"code": 0, "zpData": {"name": "测试用户", "userId": 123}}
 	mock_client.resume_baseinfo.return_value = {"code": 0, "zpData": {"degree": "本科"}}
 	mock_client.resume_expect.return_value = {"code": 0, "zpData": {"city": "北京"}}
-	mock_client.deliver_list.return_value = {"code": 0, "zpData": {"list": [], "hasMore": True, "page": 2}}
+	mock_client.deliver_list.return_value = {"code": 0, "zpData": {"list": []}}
 	runner = CliRunner()
-	result = runner.invoke(cli, ["--data-dir", str(tmp_path), "--json", "me"])
+	result = runner.invoke(cli, ["me"])
 	assert result.exit_code == 0
 	parsed = json.loads(result.output)
 	assert parsed["ok"] is True
 	assert "测试用户" in str(parsed["data"])
-	# 查全部 section 时顶层混有四段载荷，不能把投递列表的页码说成整体页码。
-	assert parsed["pagination"] is None
-	assert not any("--deliver-page" in action for action in parsed["hints"]["next_actions"])
-	assert "operator_actions" not in parsed["hints"]
-	mock_client.deliver_list.assert_called_once_with(page=1)
-
-
-@pytest.mark.parametrize(
-	("platform_data", "expected", "page", "total"),
-	[
-		({"list": [{"jobName": "后端工程师"}], "hasMore": True}, True, 2, 1),
-		({"list": [{"jobName": "后端工程师"}], "hasMore": False}, False, 2, 1),
-		({"list": [{"jobName": "后端工程师"}]}, None, 2, 1),
-		({"list": [], "hasMore": None}, None, 2, 0),
-		({"list": [], "hasMore": "true", "page": "4"}, None, 2, 0),
-		({"list": [], "hasMore": 1, "page": True}, None, 2, 0),
-		({"list": [], "hasMore": True, "page": 4}, True, 4, 0),
-		({"list": "unexpected", "hasMore": False, "page": 0}, False, 2, None),
-		(["unexpected"], None, 2, None),
-	],
-	ids=["more", "last", "missing", "null", "string", "integer", "empty-with-more", "invalid-list", "non-mapping"],
-)
-@patch("boss_agent_cli.commands.me.get_platform_instance")
-@patch("boss_agent_cli.commands.me.AuthManager")
-def test_me_deliver_pagination_evidence(mock_auth_cls, mock_client_cls, tmp_path, platform_data, expected, page, total):
-	from boss_agent_cli.services.pagination import UNKNOWN_HAS_MORE_OPERATOR_ACTION
-
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.deliver_list.return_value = {"code": 0, "zpData": platform_data}
-	runner = CliRunner()
-	result = runner.invoke(cli, ["--data-dir", str(tmp_path), "--json", "me", "--section", "deliver", "--deliver-page", "2"])
-	assert result.exit_code == 0
-	parsed = json.loads(result.output)
-	assert parsed["data"] == {"deliver": platform_data}
-	assert parsed["pagination"] == {
-		"page": page,
-		"has_more": expected,
-		"has_more_source": "platform_hasMore" if expected is not None else "unknown",
-		"total": total,
-		"total_kind": "returned_page_count",
-	}
-	next_pages = [action for action in parsed["hints"]["next_actions"] if "--deliver-page" in action]
-	if expected is True:
-		assert [shlex.split(action) for action in next_pages] == [
-			["boss", "--data-dir", str(tmp_path.resolve()), "me", "--section", "deliver", "--deliver-page", str(page + 1)],
-		]
-	else:
-		assert next_pages == []
-	if expected is None:
-		assert parsed["hints"]["operator_actions"] == [UNKNOWN_HAS_MORE_OPERATOR_ACTION]
-	else:
-		assert "operator_actions" not in parsed["hints"]
-	mock_client.deliver_list.assert_called_once_with(page=2)
-	mock_client.user_info.assert_not_called()
-	mock_client.resume_baseinfo.assert_not_called()
-	mock_client.resume_expect.assert_not_called()
-
-
-@patch("boss_agent_cli.commands.me.get_platform_instance")
-@patch("boss_agent_cli.commands.me.AuthManager")
-def test_me_deliver_next_action_is_executable(mock_auth_cls, mock_client_cls, tmp_path):
-	"""下一页指引要能直接交给 CLI 执行，并沿用调用方当前的数据目录。"""
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.deliver_list.side_effect = [
-		{"code": 0, "zpData": {"list": [], "page": 4, "hasMore": True}},
-		{"code": 0, "zpData": {"list": [], "page": 5, "hasMore": False}},
-	]
-	runner = CliRunner()
-	first = runner.invoke(cli, ["--data-dir", str(tmp_path), "--json", "me", "--section", "deliver", "--deliver-page", "4"])
-	assert first.exit_code == 0
-	action = next(action for action in json.loads(first.output)["hints"]["next_actions"] if "--deliver-page" in action)
-	second = runner.invoke(cli, ["--json", *shlex.split(action)[1:]])
-	assert second.exit_code == 0
-	assert json.loads(second.output)["pagination"]["page"] == 5
-	assert [call.kwargs for call in mock_client.deliver_list.call_args_list] == [{"page": 4}, {"page": 5}]
-	assert [call.args[0].resolve() for call in mock_auth_cls.call_args_list] == [tmp_path.resolve(), tmp_path.resolve()]
-
-
-@pytest.mark.parametrize(("code", "recoverable"), [("AUTH_EXPIRED", True), ("ACCOUNT_RISK", False)])
-@patch("boss_agent_cli.commands.me.get_platform_instance")
-@patch("boss_agent_cli.commands.me.AuthManager")
-def test_me_deliver_failure_has_no_pagination(mock_auth_cls, mock_client_cls, tmp_path, code, recoverable):
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.deliver_list.return_value = {"code": 32, "message": "fixture failure"}
-	mock_client.parse_error.return_value = (code, "fixture failure")
-	result = CliRunner().invoke(cli, ["--data-dir", str(tmp_path), "--json", "me", "--section", "deliver"])
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["pagination"] is None
-	assert parsed["error"]["code"] == code
-	assert parsed["error"]["recoverable"] is recoverable
-	if code in {"AUTH_REQUIRED", "AUTH_EXPIRED", "TOKEN_REFRESH_FAILED"}:
-		# 认证错误在运行目录内重新登录，不再回显登记表的通用示例。
-		assert shlex.split(parsed["error"]["recovery_action"]) == [
-			"boss", "--data-dir", str(tmp_path.resolve()), "login",
-		]
-	elif code in {"ACCOUNT_RISK", "ENVIRONMENT_RISK", "ENVIRONMENT_RISK_LOCKED"}:
-		# 风控解锁命令定位运行目录（Issue #978）。
-		assert f"boss --data-dir {tmp_path.resolve()} clean --risk-lock" in parsed["error"]["recovery_action"]
-	else:
-		assert parsed["error"]["recovery_action"] == error_contract_for_code(code)[1]
-	mock_client.deliver_list.assert_called_once_with(page=1)
-	mock_client.unwrap_data.assert_not_called()
 
 
 @patch("boss_agent_cli.commands.me.get_platform_instance")
@@ -795,8 +652,6 @@ def test_me_user_section_supports_data_envelope(mock_auth_cls, mock_client_cls):
 	parsed = json.loads(result.output)
 	assert parsed["ok"] is True
 	assert parsed["data"]["user"]["name"] == "示例用户"
-	assert parsed["pagination"] is None
-	mock_client.deliver_list.assert_not_called()
 
 
 @patch("boss_agent_cli.commands.me.get_platform_instance")
@@ -812,59 +667,7 @@ def test_me_reports_user_info_error(mock_auth_cls, mock_client_cls):
 	assert parsed["error"]["code"] == "TOKEN_REFRESH_FAILED"
 	assert parsed["error"]["message"] == "stoken expired"
 	assert parsed["error"]["recoverable"] is True
-	assert shlex.split(parsed["error"]["recovery_action"]) == ["boss", "--data-dir", _DEFAULT_DATA_DIR, "login"]
-
-
-@patch("boss_agent_cli.commands.me.get_platform_instance")
-@patch("boss_agent_cli.commands.me.AuthManager")
-@pytest.mark.parametrize("error_cls,code", [
-	("AccountRiskError", "ACCOUNT_RISK"),
-	("EnvironmentRiskError", "ENVIRONMENT_RISK"),
-	("EnvironmentRiskLockedError", "ENVIRONMENT_RISK_LOCKED"),
-])
-def test_me_risk_uses_stop_contract(mock_auth_cls, mock_client_cls, error_cls, code):
-	"""me 没有 @handle_auth_errors：风控必须显式按停止契约输出，不能变成 NETWORK_ERROR。"""
-	from boss_agent_cli.api.client import AccountRiskError, EnvironmentRiskError, EnvironmentRiskLockedError
-
-	errors = {
-		"AccountRiskError": AccountRiskError,
-		"EnvironmentRiskError": EnvironmentRiskError,
-		"EnvironmentRiskLockedError": EnvironmentRiskLockedError,
-	}
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.user_info.side_effect = errors[error_cls]("private-token")
-	runner = CliRunner()
-	result = runner.invoke(cli, ["me", "--section", "user"])
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == code
-	assert parsed["error"]["recoverable"] is False
-	# 风控解锁命令定位本次运行的数据目录（这里是默认目录，Issue #978）。
-	assert parsed["error"]["recovery_action"] == risk_error_contract(
-		code,
-		clean_command=f"boss --data-dir {_DEFAULT_DATA_DIR} clean --risk-lock",
-		doctor_command=f"boss --data-dir {_DEFAULT_DATA_DIR} doctor",
-	)[0]
-	assert parsed["hints"]["next_actions"]
-	assert "private-token" not in result.output
-
-
-@patch("boss_agent_cli.commands.me.get_platform_instance")
-@patch("boss_agent_cli.commands.me.AuthManager")
-def test_me_budget_stop_uses_contract(mock_auth_cls, mock_client_cls):
-	"""me 没有 @handle_auth_errors：预算/时限停止不能降级成可重试的 NETWORK_ERROR。"""
-	from boss_agent_cli.api.request_budget import RequestBudgetExceeded
-
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.user_info.side_effect = RequestBudgetExceeded("fixture budget stop")
-	runner = CliRunner()
-	result = runner.invoke(cli, ["me", "--section", "user"])
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "REQUEST_BUDGET_EXHAUSTED"
-	assert (parsed["error"]["recoverable"], parsed["error"]["recovery_action"]) == error_contract_for_code(
-		"REQUEST_BUDGET_EXHAUSTED"
-	)
+	assert parsed["error"]["recovery_action"] == "boss login"
 
 
 @patch("boss_agent_cli.commands.me.get_platform_instance")
@@ -962,68 +765,6 @@ def test_history_success(mock_auth_cls, mock_client_cls):
 
 @patch("boss_agent_cli.commands.history.get_platform_instance")
 @patch("boss_agent_cli.commands.history.AuthManager")
-def test_history_hints_omit_next_page_when_no_more(mock_auth_cls, mock_client_cls):
-	"""hasMore=false 时不能建议 --page N+1：Agent 照着执行只会拿到空页。"""
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.job_history.return_value = {"code": 0, "zpData": {"hasMore": False, "jobList": []}}
-	runner = CliRunner()
-	result = runner.invoke(cli, ["history", "--page", "3"])
-	assert result.exit_code == 0
-	parsed = json.loads(result.output)
-	assert all("--page" not in action for action in parsed["hints"]["next_actions"])
-
-
-@patch("boss_agent_cli.commands.history.get_platform_instance")
-@patch("boss_agent_cli.commands.history.AuthManager")
-def test_history_hints_include_next_page_when_has_more(mock_auth_cls, mock_client_cls):
-	"""hasMore=true 时保留下一页提示，页码基于当前页 +1。"""
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.job_history.return_value = {"code": 0, "zpData": {"hasMore": True, "jobList": []}}
-	runner = CliRunner()
-	result = runner.invoke(cli, ["history", "--page", "2"])
-	assert result.exit_code == 0
-	parsed = json.loads(result.output)
-	assert any("history --page 3" in action for action in parsed["hints"]["next_actions"])
-
-
-@pytest.mark.parametrize(
-	("platform_has_more", "expected"),
-	[(True, True), (False, False), ("missing", None)],
-)
-@patch("boss_agent_cli.commands.history.get_platform_instance")
-@patch("boss_agent_cli.commands.history.AuthManager")
-def test_history_pagination_reports_platform_evidence(mock_auth_cls, mock_client_cls, platform_has_more, expected):
-	"""缺失 hasMore 时返回 null，不能伪造成 false；三态都必须记录来源。"""
-	mock_client = _ctx_mock(mock_client_cls)
-	zp_data = {"jobList": []}
-	if platform_has_more != "missing":
-		zp_data["hasMore"] = platform_has_more
-	mock_client.job_history.return_value = {"code": 0, "zpData": zp_data}
-	result = CliRunner().invoke(cli, ["--json", "history", "--page", "2"])
-	assert result.exit_code == 0
-	parsed = json.loads(result.output)
-	pagination = parsed["pagination"]
-	assert pagination["page"] == 2
-	assert pagination["has_more"] is expected
-	assert pagination["has_more_source"] == ("platform_hasMore" if expected is not None else "unknown")
-	assert pagination["total"] == 0
-	assert pagination["total_kind"] == "returned_page_count"
-	next_pages = [action for action in parsed["hints"]["next_actions"] if "history --page" in action]
-	if expected is True:
-		assert len(next_pages) == 1
-		assert next_pages[0].endswith("history --page 3")
-	else:
-		assert next_pages == []
-	if expected is None:
-		assert parsed["hints"]["operator_actions"] == [
-			"平台未提供可靠的下一页标记，不能仅凭本页数量判断是否还有记录"
-		]
-	else:
-		assert "operator_actions" not in parsed["hints"]
-
-
-@patch("boss_agent_cli.commands.history.get_platform_instance")
-@patch("boss_agent_cli.commands.history.AuthManager")
 def test_history_uses_client_context_manager(mock_auth_cls, mock_client_cls):
 	instance = mock_client_cls.return_value
 	instance.__enter__ = MagicMock(return_value=instance)
@@ -1085,7 +826,7 @@ def test_interviews_success(mock_auth_cls, mock_client_cls):
 	assert result.exit_code == 0
 	parsed = json.loads(result.output)
 	assert parsed["ok"] is True
-	assert parsed["hints"]["next_actions"][0] == f"boss --data-dir {_DEFAULT_DATA_DIR} search <query>"
+	assert parsed["hints"]["next_actions"][0] == "boss search <query>"
 
 
 @patch("boss_agent_cli.commands.interviews.get_platform_instance")
@@ -1103,7 +844,7 @@ def test_interviews_supports_data_envelope(mock_auth_cls, mock_client_cls):
 	assert result.exit_code == 0
 	parsed = json.loads(result.output)
 	assert parsed["data"][0]["jobName"] == "测试岗位"
-	assert parsed["hints"]["next_actions"][0] == f"boss --data-dir {_DEFAULT_DATA_DIR} search <query>"
+	assert parsed["hints"]["next_actions"][0] == "boss search <query>"
 
 
 @patch("boss_agent_cli.commands.interviews.get_platform_instance")
@@ -1118,9 +859,9 @@ def test_interviews_reports_platform_error(mock_auth_cls, mock_client_cls):
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "ACCOUNT_RISK"
-	assert parsed["error"]["message"] == risk_error_message("ACCOUNT_RISK")
+	assert parsed["error"]["message"] == "account risk"
 	assert parsed["error"]["recoverable"] is False
-	assert parsed["error"]["recovery_action"] == _risk_recovery_for_default_dir("ACCOUNT_RISK")
+	assert parsed["error"]["recovery_action"] == "停止自动化访问，回到平台官网手动处理；确认目标业务页风险解除后，由用户执行 boss clean --risk-lock 并显式恢复任务，必要时联系客服"
 
 
 @patch("boss_agent_cli.commands.interviews.get_platform_instance")
@@ -1362,19 +1103,3 @@ def test_schema_includes_new_commands_v2():
 	assert "chatmsg" in commands
 	assert "mark" in commands
 	assert "exchange" in commands
-
-
-@patch("boss_agent_cli.commands.chatmsg.get_platform_instance")
-@patch("boss_agent_cli.commands.chatmsg.AuthManager")
-def test_chatmsg_missing_contact_recovery_points_to_chat(mock_auth_cls, mock_client_cls):
-	"""联系人不在沟通列表里不是「职位下架」：错误码与恢复动作都要指向会话列表。"""
-	mock_client = _ctx_mock(mock_client_cls)
-	mock_client.friend_list.return_value = _friend_list_response([])
-
-	result = CliRunner().invoke(cli, ["chatmsg", "sec_nonexistent"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "CONTACT_NOT_FOUND"
-	assert parsed["error"]["recovery_action"] == "boss chat"
-	assert parsed["hints"]["next_actions"] == [f"boss --data-dir {_DEFAULT_DATA_DIR} chat"]

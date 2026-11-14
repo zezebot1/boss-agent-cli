@@ -1,8 +1,6 @@
 from io import BytesIO
 import json
 import os
-import shlex
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 from zipfile import ZipFile
 
@@ -16,40 +14,10 @@ from boss_agent_cli.api.recruiter_client import BossRecruiterClient, RecruiterAu
 from boss_agent_cli.api.recruiter_resume import ResumeValidationError, attachment_params, save_resume
 from boss_agent_cli.auth.manager import AuthRequired
 from boss_agent_cli.schema.data import SCHEMA_DATA
-from boss_agent_cli.display import error_contract_for_code, risk_error_contract
+from boss_agent_cli.display import error_contract_for_code
 from boss_agent_cli.main import cli
-
 from boss_agent_cli.mcp_args import _build_args
 from boss_agent_cli.platforms.zhipin_recruiter import BossRecruiterPlatform
-
-_DEFAULT_DATA_DIR = str((Path.home() / ".boss-agent").resolve())
-
-
-def _hint(command: str) -> str:
-	"""默认数据目录下的招聘者后继命令。"""
-	return f"boss --data-dir {(Path.home() / '.boss-agent').resolve()} {command}"
-
-
-def _risk_recovery_for_default_dir(code: str) -> str:
-	"""风控停止契约的 recovery_action，解锁命令指向默认数据目录（Issue #978）。"""
-	return risk_error_contract(
-		code,
-		clean_command=f"boss --data-dir {_DEFAULT_DATA_DIR} clean --risk-lock",
-		doctor_command=f"boss --data-dir {_DEFAULT_DATA_DIR} doctor",
-	)[0]
-
-
-def _assert_download_error_contract(payload: dict, code: str) -> None:
-	error = payload["error"]
-	assert error["recoverable"] is error_contract_for_code(code)[0]
-	if code in {"AUTH_REQUIRED", "TOKEN_REFRESH_FAILED"}:
-		assert shlex.split(error["recovery_action"]) == ["boss", "--data-dir", str((Path.home() / ".boss-agent").resolve()), "login"]
-		assert payload["hints"]["next_actions"] == [error["recovery_action"]]
-	elif code in {"ACCOUNT_RISK", "ENVIRONMENT_RISK", "ENVIRONMENT_RISK_LOCKED"}:
-		# 风控解锁命令指向运行目录（这里是默认目录），不再是裸命令（Issue #978）。
-		assert error["recovery_action"] == _risk_recovery_for_default_dir(code)
-	else:
-		assert error["recovery_action"] == error_contract_for_code(code)[1]
 
 
 def test_removed_experiments_do_not_remove_native_or_attachment_commands():
@@ -294,19 +262,6 @@ def test_accept_confirmation_and_preview_do_not_access_auth():
 		auth.assert_not_called()
 
 
-def test_accept_validation_error_points_at_chat_lookup():
-	"""平台数据无法确定附件目标时，要指向 hr chat 核对，而不是只报一句校验失败。"""
-	module = "boss_agent_cli.commands.recruiter.accept_resume"
-	with patch(module + ".AuthManager"), patch(module + ".get_recruiter_platform_instance") as factory:
-		platform = factory.return_value.__enter__.return_value
-		platform.accept_resume_by_friend.side_effect = ResumeValidationError("附件请求不匹配")
-		result = _invoke("accept-resume", "123", "--message-id", "456", "--yes")
-	error = json.loads(result.output)["error"]
-	assert error["code"] == "INVALID_PARAM"
-	assert _hint("hr chat") in error["recovery_action"]
-	assert json.loads(result.output)["hints"]["next_actions"] == [_hint("hr chat")]
-
-
 @pytest.mark.parametrize("status,success", [(0, True), (1, False), (2, False), (4, False), (None, False), (False, False)])
 def test_accept_requires_both_success_codes(status, success):
 	with patch("boss_agent_cli.commands.recruiter.accept_resume.AuthManager"), patch("boss_agent_cli.commands.recruiter.accept_resume.get_recruiter_platform_instance") as factory:
@@ -333,24 +288,6 @@ def test_accept_response_decode_failure_is_unknown_and_redacted():
 		assert json.loads(result.output)["error"]["code"] == "RESUME_ACCEPT_RESULT_UNKNOWN"
 		assert "private-token" not in result.output
 		platform.accept_resume_by_friend.assert_called_once()
-
-
-def test_accept_budget_stop_is_not_result_unknown():
-	"""预算/时限在调度前停止：同意请求没有发出，不能报成「结果未知」。"""
-	from boss_agent_cli.api.request_budget import RequestBudgetExceeded
-
-	module = "boss_agent_cli.commands.recruiter.accept_resume"
-	with patch(module + ".AuthManager"), patch(module + ".get_recruiter_platform_instance") as factory:
-		platform = factory.return_value.__enter__.return_value
-		platform.accept_resume_by_friend.side_effect = RequestBudgetExceeded("fixture budget stop")
-		result = _invoke("accept-resume", "123", "--message-id", "456", "--yes")
-	payload = json.loads(result.output)
-	assert result.exit_code == 1
-	assert payload["error"]["code"] == "REQUEST_BUDGET_EXHAUSTED"
-	assert payload["error"]["details"] == {"request_sent": False}
-	assert (payload["error"]["recoverable"], payload["error"]["recovery_action"]) == error_contract_for_code(
-		"REQUEST_BUDGET_EXHAUSTED"
-	)
 
 
 def test_platform_adapter_and_mcp_mapping(tmp_path):
@@ -400,28 +337,8 @@ def test_download_cli_returns_only_file_metadata(tmp_path):
 		platform.is_success.return_value = True
 		platform.unwrap_data.side_effect = lambda response: response["zpData"]
 		result = _invoke("download-resume", "123", "--message-id", "456", "--output", str(tmp_path / "resume.pdf"))
-		payload = json.loads(result.output)
-		assert payload["data"]["downloaded"] is True
-		# 落盘之后要给可执行的后继命令，操作者也要看得出文件在哪。
-		assert payload["hints"]["next_actions"] == [_hint("hr chatmsg 123")]
-		assert str((tmp_path / "resume.pdf").resolve()) in payload["hints"]["operator_actions"][0]
+		assert json.loads(result.output)["data"]["downloaded"] is True
 		platform.download_resume_by_friend.assert_called_once_with(123, 456, tmp_path / "resume.pdf")
-
-
-def test_download_cli_expands_tilde_and_creates_parent(tmp_path, monkeypatch):
-	"""MCP 子进程调用不经 shell，`~` 不会被展开；父目录也可能尚不存在。"""
-	monkeypatch.setenv("HOME", str(tmp_path))
-	monkeypatch.setenv("USERPROFILE", str(tmp_path))
-	with patch("boss_agent_cli.commands.recruiter.download_resume.AuthManager"), patch("boss_agent_cli.commands.recruiter.download_resume.get_recruiter_platform_instance") as factory:
-		platform = factory.return_value.__enter__.return_value
-		platform.download_resume_by_friend.return_value = {"code": 0, "zpData": {"path": "x", "bytes": 100, "format": "pdf"}}
-		platform.is_success.return_value = True
-		platform.unwrap_data.side_effect = lambda response: response["zpData"]
-		result = _invoke("download-resume", "123", "--message-id", "456", "--output", "~/resumes/2026/resume.pdf")
-		assert result.exit_code == 0
-		expected = tmp_path / "resumes" / "2026" / "resume.pdf"
-		platform.download_resume_by_friend.assert_called_once_with(123, 456, expected)
-		assert expected.parent.is_dir()
 
 
 def test_download_cli_redacts_http_errors():
@@ -453,21 +370,12 @@ def test_new_commands_are_discoverable_with_compliance():
 	("RecruiterAuthError", "AUTH_REQUIRED"),
 	("TokenRefreshFailed", "TOKEN_REFRESH_FAILED"),
 	("AccountRiskError", "ACCOUNT_RISK"),
-	("EnvironmentRiskError", "ENVIRONMENT_RISK"),
-	("EnvironmentRiskLockedError", "ENVIRONMENT_RISK_LOCKED"),
 ])
 def test_resume_auth_and_risk_failures_stop_without_leaking(action, error_type, code):
-	from boss_agent_cli.api.client import AccountRiskError, EnvironmentRiskError, EnvironmentRiskLockedError
+	from boss_agent_cli.api.client import AccountRiskError
 	from boss_agent_cli.auth.manager import AuthRequired, TokenRefreshFailed
 
-	errors = {
-		"AuthRequired": AuthRequired,
-		"RecruiterAuthError": RecruiterAuthError,
-		"TokenRefreshFailed": TokenRefreshFailed,
-		"AccountRiskError": AccountRiskError,
-		"EnvironmentRiskError": EnvironmentRiskError,
-		"EnvironmentRiskLockedError": EnvironmentRiskLockedError,
-	}
+	errors = {"AuthRequired": AuthRequired, "RecruiterAuthError": RecruiterAuthError, "TokenRefreshFailed": TokenRefreshFailed, "AccountRiskError": AccountRiskError}
 	module = "boss_agent_cli.commands.recruiter." + action
 	with patch(module + ".AuthManager"), patch(module + ".get_recruiter_platform_instance") as factory:
 		platform = factory.return_value.__enter__.return_value
@@ -475,67 +383,16 @@ def test_resume_auth_and_risk_failures_stop_without_leaking(action, error_type, 
 		method.side_effect = errors[error_type]("private-token")
 		args = ["--yes"] if action == "accept_resume" else ["--output", "resume.pdf"]
 		result = _invoke(action.replace("_", "-"), "123", "--message-id", "456", *args)
-		payload = json.loads(result.output)
-		error = payload["error"]
+		error = json.loads(result.output)["error"]
 		assert error["code"] == code
-		if action == "download_resume":
-			_assert_download_error_contract(payload, code)
+		if action == "download_resume" and code != "ACCOUNT_RISK":
+			assert (error["recoverable"], error["recovery_action"]) == error_contract_for_code(code)
 		else:
 			assert error["recoverable"] is False
-			assert error["recovery_action"]
-		if code in {"ACCOUNT_RISK", "ENVIRONMENT_RISK", "ENVIRONMENT_RISK_LOCKED"}:
-			# 风控异常必须走统一停止契约，不能漏进 NETWORK_ERROR / 结果未知兜底；
-			# 解锁命令定位运行目录（Issue #978）。
-			assert error["recovery_action"] == _risk_recovery_for_default_dir(code)
-			assert payload["hints"]["next_actions"]
 		assert "private-token" not in result.output
 		if action == "accept_resume":
 			assert error["details"]["accepted"] is None
 		method.assert_called_once()
-
-
-@pytest.mark.parametrize(
-	("side_effect", "message_fragment", "recovery_fragment", "expected_hints"),
-	[
-		(FileExistsError(), "输出文件已存在", "换一个 --output 文件名", None),
-		(OSError("disk"), "无法保存文件", "父目录存在且可写", None),
-		(ResumeValidationError("该消息不是附件简历请求，不会执行联系方式交换"), "附件简历请求", _hint("hr chat"), [_hint("hr chat")]),
-	],
-)
-def test_download_resume_local_errors_give_actionable_recovery(
-	side_effect, message_fragment, recovery_fragment, expected_hints
-):
-	"""本地文件与请求校验失败不能只回「修正参数」：要说明下一步怎么做。"""
-	module = "boss_agent_cli.commands.recruiter.download_resume"
-	with patch(module + ".AuthManager"), patch(module + ".get_recruiter_platform_instance") as factory:
-		platform = factory.return_value.__enter__.return_value
-		platform.download_resume_by_friend.side_effect = side_effect
-		result = _invoke("download-resume", "123", "--message-id", "456", "--output", "resume.pdf")
-
-	payload = json.loads(result.output)
-	assert payload["error"]["code"] == "INVALID_PARAM"
-	assert message_fragment in payload["error"]["message"]
-	assert recovery_fragment in payload["error"]["recovery_action"]
-	if expected_hints is None:
-		assert payload["hints"] is None
-	else:
-		assert payload["hints"]["next_actions"] == expected_hints
-
-
-def test_download_budget_stop_is_not_network_error():
-	"""下载遇到预算/时限停止时不能提示「检查网络后重试」。"""
-	from boss_agent_cli.api.request_budget import RequestBudgetExceeded
-
-	module = "boss_agent_cli.commands.recruiter.download_resume"
-	with patch(module + ".AuthManager"), patch(module + ".get_recruiter_platform_instance") as factory:
-		platform = factory.return_value.__enter__.return_value
-		platform.download_resume_by_friend.side_effect = RequestBudgetExceeded("fixture budget stop")
-		result = _invoke("download-resume", "123", "--message-id", "456", "--output", "resume.pdf")
-	payload = json.loads(result.output)
-	assert payload["error"]["code"] == "REQUEST_BUDGET_EXHAUSTED"
-	assert (payload["error"]["recoverable"], payload["error"]["recovery_action"]) == error_contract_for_code(
-		"REQUEST_BUDGET_EXHAUSTED"
-	)
 
 
 @pytest.mark.parametrize("action", ["accept_resume", "download_resume"])
@@ -556,8 +413,7 @@ def test_resume_platform_errors_use_declared_codes_and_safe_recovery(action, res
 		factory.return_value.__enter__.return_value = BossRecruiterPlatform(client)
 		args = ["--yes"] if action == "accept_resume" else ["--output", "resume.pdf"]
 		result = _invoke(action.replace("_", "-"), "123", "--message-id", "456", *args)
-		payload = json.loads(result.output)
-		error = payload["error"]
+		error = json.loads(result.output)["error"]
 		if code == "UNKNOWN":
 			code = "RESUME_ACCEPT_RESULT_UNKNOWN" if action == "accept_resume" else "NETWORK_ERROR"
 		assert error["code"] == code
@@ -566,17 +422,9 @@ def test_resume_platform_errors_use_declared_codes_and_safe_recovery(action, res
 		if action == "accept_resume":
 			assert error["details"]["accepted"] is None
 			assert error["recoverable"] is False
-			if code in {"ACCOUNT_RISK", "ENVIRONMENT_RISK"}:
-				# 响应字典形态的风控码同样给统一停止指引，不只让用户核对本次请求；
-				# 解锁命令定位运行目录（Issue #978）。
-				assert error["recovery_action"] == _risk_recovery_for_default_dir(code)
-				assert payload["hints"]["next_actions"]
-			else:
-				assert "不要自动重试" in error["recovery_action"]
+			assert "不要自动重试" in error["recovery_action"]
 		else:
-			_assert_download_error_contract(payload, code)
-			if code in {"ACCOUNT_RISK", "ENVIRONMENT_RISK"}:
-				assert payload["hints"]["next_actions"]
+			assert (error["recoverable"], error["recovery_action"]) == error_contract_for_code(code)
 		method.assert_called_once()
 
 

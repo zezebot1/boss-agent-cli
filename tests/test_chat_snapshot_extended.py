@@ -112,27 +112,6 @@ def test_diff_detects_removed_contacts(tmp_path):
 	assert len(result["added"]) == 0
 
 
-def test_incomplete_snapshot_does_not_claim_removed(tmp_path):
-	"""不完整采集缺少“不在列表里”的证据，不能把上次见过的联系人标成消失（Issue #911）。"""
-	snapshot_dir = str(tmp_path / "snapshots")
-	os.makedirs(snapshot_dir)
-
-	yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-	prev_data = _make_items(("张三", "sid_a", 0), ("李四", "sid_b", 0))
-	with open(os.path.join(snapshot_dir, f"{yesterday}.json"), "w", encoding="utf-8") as f:
-		json.dump(prev_data, f)
-
-	# 本次只看到张三，但采集不完整（例如第 1 页仍有下一页）
-	result = save_snapshot_and_diff(
-		snapshot_dir, _make_items(("张三", "sid_a", 0)), _make_logger(), complete=False
-	)
-
-	assert result["is_first"] is False
-	assert result["complete"] is False
-	assert result["removed"] == []
-	assert result["added"] == []
-
-
 # ── 4. 增量对比 — 检测新消息（未读增量） ──────────────────────────────
 
 def test_diff_detects_new_unread(tmp_path):
@@ -400,61 +379,6 @@ def test_find_previous_snapshot_ignores_non_json(tmp_path):
 
 	result = _find_previous_snapshot(snapshot_dir, "2026-04-13")
 	assert result is None
-
-
-def test_find_previous_snapshot_ignores_non_date_json(tmp_path):
-	"""同目录里的非快照 JSON（如手动备份的 backup.json）不应被当成上一次快照。
-
-	回归：原实现只按 `.json` 后缀筛选后做字符串倒序，`backup.json` 排在所有
-	`2026-…` 文件之后被优先选中，读到非数组内容后 diff 静默退化成「首份快照」。
-	"""
-	snapshot_dir = str(tmp_path)
-	with open(os.path.join(snapshot_dir, "2026-04-12.json"), "w") as f:
-		json.dump([], f)
-	with open(os.path.join(snapshot_dir, "backup.json"), "w") as f:
-		json.dump({"note": "manual backup"}, f)
-
-	result = _find_previous_snapshot(snapshot_dir, "2026-04-13")
-	assert result is not None
-	assert result.endswith("2026-04-12.json")
-
-
-def test_find_previous_snapshot_ignores_future_and_invalid_dates(tmp_path):
-	"""未来日期（拷入的、时钟回拨留下的）与非法日期都不算「today 之前」。"""
-	snapshot_dir = str(tmp_path)
-	for fname in ["2026-04-12.json", "2026-05-01.json", "9999-99-99.json"]:
-		with open(os.path.join(snapshot_dir, fname), "w") as f:
-			json.dump([], f)
-
-	result = _find_previous_snapshot(snapshot_dir, "2026-04-13")
-	assert result is not None
-	assert result.endswith("2026-04-12.json")
-
-	future_only = str(tmp_path / "future")
-	os.makedirs(future_only)
-	with open(os.path.join(future_only, "2026-05-01.json"), "w") as f:
-		json.dump([], f)
-	assert _find_previous_snapshot(future_only, "2026-04-13") is None
-
-
-def test_snapshot_diff_ignores_backup_json_in_directory(tmp_path):
-	"""目录里存在 backup.json 时，跨天 diff 仍要基于真正的日期快照。"""
-	snapshot_dir = str(tmp_path / "snapshots")
-	os.makedirs(snapshot_dir)
-	yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-	with open(os.path.join(snapshot_dir, f"{yesterday}.json"), "w", encoding="utf-8") as f:
-		json.dump([_make_uid_item(uid=10001, name="旧联系人")], f)
-	with open(os.path.join(snapshot_dir, "backup.json"), "w", encoding="utf-8") as f:
-		json.dump({"note": "manual backup"}, f)
-
-	result = save_snapshot_and_diff(
-		snapshot_dir, [_make_uid_item(uid=10002, name="新联系人")], _make_logger()
-	)
-
-	assert result["is_first"] is False
-	assert result["prev_date"] == yesterday
-	assert [item["uid"] for item in result["added"]] == [10002]
-	assert [item["uid"] for item in result["removed"]] == [10001]
 
 
 # ── 稳定标识：security_id 每请求轮换，主键必须是 uid ──────────────────

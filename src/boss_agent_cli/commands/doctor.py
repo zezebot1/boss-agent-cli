@@ -8,54 +8,20 @@ from typing import Any
 import click
 import httpx
 
-from boss_agent_cli.config import DEFAULT_REQUEST_DELAY
 from boss_agent_cli.api.browser_urls import DEFAULT_CDP_URL
-from boss_agent_cli.api.cdp_risk_lock import unlock_operator_actions
+from boss_agent_cli.api.cdp_risk_lock import UNLOCK_OPERATOR_ACTIONS
 from boss_agent_cli.api.request_budget import risk_lock_status as lock_status
 from boss_agent_cli.auth.browser import probe_cdp
 from boss_agent_cli.auth.cookie_extract import extract_cookies
 from boss_agent_cli.auth.health import assess_auth_health, auth_config_for_platform
 from boss_agent_cli.auth.manager import AuthManager
 from boss_agent_cli.commands._doctor_checks import _add_live_probe_checks, _add_quality_baseline_checks, _doctor_command
-from boss_agent_cli.display import (
-	boss_command_for_ctx,
-	handle_output,
-	login_action_for_ctx,
-	platform_error_contract,
-	render_simple_list,
-)
+from boss_agent_cli.display import handle_output, render_simple_list
 from boss_agent_cli.services.browser_runtime import (
 	evaluate_patchright_chromium,
-	installed_browser_dirs,
+	patchright_browser_cache_dirs,
 	patchright_chromium_revision,
-	patchright_importable,
-	patchright_install_command,
 )
-
-
-#: 实测：15 秒间隔连续 3 次 search 会在第 3 次命中 code 37，90 秒间隔 3/3 通过。
-#: 阈值取 30 秒——低于它给出的提示仍然成立，又不是在做精确的安全承诺。
-_RISK_FREE_DELAY_FLOOR = 30.0
-
-
-def _risk_lock_check_payload(risk_lock: dict[str, Any], *, clean_command: str = "boss clean --risk-lock") -> dict[str, Any]:
-	"""本地风险锁的检查项；初次读取和探测命中后的复读共用同一份文案。
-
-	``clean_command`` 由调用方按当前数据目录构造：锁文件在 ``<data_dir>`` 下，
-	裸命令只会去默认目录解锁（Issue #978）。
-	"""
-	since = risk_lock.get("locked_at", "未知时间")
-	if risk_lock.get("corrupt"):
-		detail = "BOSS 本地风控锁文件无法解析，所有平台请求会在本地被拒绝"
-	else:
-		detail = f"BOSS 自 {since} 起记录 {risk_lock.get('reason', 'ENVIRONMENT_RISK')}，所有平台请求会在本地被拒绝"
-	return {
-		"name": "cdp_risk_lock",
-		"status": "warn",
-		"detail": detail,
-		"hint": f"在原会话的 BOSS 官方目标业务页确认风险解除后，由用户运行 {clean_command} 再显式恢复任务；"
-		"令牌变化不会自动解锁，本地清理不解除服务器风险",
-	}
 
 
 @click.command("doctor")
@@ -86,44 +52,31 @@ def doctor_cmd(ctx: click.Context, live_probe: bool, probe_cookies: bool) -> Non
 	import sys
 
 	py_version = sys.version_info
-	python_ok = py_version >= (3, 11)
+	python_ok = py_version >= (3, 10)
 	py_detail = f"Python {py_version.major}.{py_version.minor}.{py_version.micro}"
 	add_check(
 		"python",
 		"ok" if python_ok else "error",
-		f"{py_detail}" if python_ok else f"{py_detail}（需要 >=3.11）",
-		None if python_ok else "升级 Python 到 3.11+",
+		f"{py_detail}" if python_ok else f"{py_detail}（需要 >=3.10）",
+		None if python_ok else "升级 Python 到 3.10+",
 	)
 
-	# 1b) 请求节奏：默认 1.5-3.0 秒远低于实测可持续节奏（见
-	# docs/research/zhipin-cdp-free-read-path-2026-10-29.md 第七节）。这里只提示，
-	# 不改用户配置、不发任何请求。
-	delay = ctx.obj.get("delay") or DEFAULT_REQUEST_DELAY
-	low_delay = float(delay[0])
-	if low_delay < _RISK_FREE_DELAY_FLOOR:
-		add_check(
-			"request_delay",
-			"warn",
-			f"当前请求间隔下限 {low_delay:g}s，低于实测可持续节奏；连续多条命令容易命中 code 37",
-			f"交互式连续运行时建议 --delay {int(_RISK_FREE_DELAY_FLOOR)}-{int(_RISK_FREE_DELAY_FLOOR) * 2}",
-		)
-	else:
-		add_check("request_delay", "ok", f"请求间隔下限 {low_delay:g}s")
-
-	# patchright 是运行本 CLI 的解释器里的依赖：`uv tool install` / `pipx install`
-	# 只把 boss / boss-mcp 放到 PATH，按 `which patchright` 判断会误报缺失
-	# （Issue #1060）。内核安装与 launch 都走同一个解释器，这里也按导入判断。
-	importable = patchright_importable()
+	patchright_bin = shutil.which("patchright")
 	add_check(
 		"patchright",
-		"ok" if importable else "warn",
-		"patchright 可在当前解释器导入（内核安装直接使用同一解释器）"
-		if importable
-		else "当前解释器无法导入 patchright；浏览器扫码与 PDF 导出不可用",
-		None if importable else "用原安装方式重装 boss-agent-cli（含 patchright 依赖）后重新自检",
+		"ok" if patchright_bin else "warn",
+		f"{patchright_bin}" if patchright_bin else "未找到 patchright 可执行文件",
+		"运行 uv run patchright install chromium 或确认已正确安装 patchright",
 	)
 
-	chromium_candidates = installed_browser_dirs()
+	patchright_browser_dirs = [
+		*patchright_browser_cache_dirs(),
+	]
+	chromium_candidates: list[Path] = []
+	for base in patchright_browser_dirs:
+		if base.exists():
+			chromium_candidates.extend(base.glob("chromium-*"))
+			chromium_candidates.extend(base.glob("chromium_headless_shell-*"))
 	chromium_status, chromium_detail = evaluate_patchright_chromium(
 		patchright_chromium_revision(), chromium_candidates
 	)
@@ -131,7 +84,7 @@ def doctor_cmd(ctx: click.Context, live_probe: bool, probe_cookies: bool) -> Non
 		"patchright_chromium",
 		chromium_status,
 		chromium_detail,
-		f"运行 {patchright_install_command()} 安装浏览器内核",
+		"运行 patchright install chromium 安装浏览器内核",
 	)
 
 	chrome_bins = [
@@ -165,14 +118,7 @@ def doctor_cmd(ctx: click.Context, live_probe: bool, probe_cookies: bool) -> Non
 
 	# 2) Auth storage
 	token = auth.check_status()
-	auth_health = assess_auth_health(
-		data_dir,
-		platform=platform_name,
-		token=token,
-		login_action=login_action_for_ctx(ctx),
-		logout_action=boss_command_for_ctx(ctx, "logout", include_data_dir=True),
-		status_action=boss_command_for_ctx(ctx, "status", include_data_dir=True),
-	)
+	auth_health = assess_auth_health(data_dir, platform=platform_name, token=token)
 	has_token = auth_health.token_present
 	checks.extend(auth_health.checks_as_dicts())
 
@@ -233,10 +179,18 @@ def doctor_cmd(ctx: click.Context, live_probe: bool, probe_cookies: bool) -> Non
 
 	# 4.5) BOSS 本地风险锁（沿用历史字段，只读本地文件）
 	risk_lock = lock_status(Path(data_dir)) if platform_name == "zhipin" else {"locked": False}
-	# 锁文件在本次 --data-dir 下：检查项的解锁命令必须同目录。
-	clean_lock_command = boss_command_for_ctx(ctx, "clean --risk-lock", include_data_dir=True)
 	if risk_lock["locked"]:
-		checks.append(_risk_lock_check_payload(risk_lock, clean_command=clean_lock_command))
+		since = risk_lock.get("locked_at", "未知时间")
+		detail = f"BOSS 自 {since} 起记录 {risk_lock.get('reason', 'ENVIRONMENT_RISK')}，所有平台请求会在本地被拒绝"
+		if risk_lock.get("corrupt"):
+			detail = "BOSS 本地风控锁文件无法解析，所有平台请求会在本地被拒绝"
+		add_check(
+			"cdp_risk_lock",
+			"warn",
+			detail,
+			"在原会话的 BOSS 官方目标业务页确认风险解除后，由用户运行 boss clean --risk-lock 再显式恢复任务；"
+			"令牌变化不会自动解锁，本地清理不解除服务器风险",
+		)
 	else:
 		add_check("cdp_risk_lock", "ok", "未记录 BOSS 本地风控锁")
 
@@ -264,25 +218,14 @@ def doctor_cmd(ctx: click.Context, live_probe: bool, probe_cookies: bool) -> Non
 			"browser_channel",
 			"warn",
 			"CDP 不可用；普通 httpx 读取不依赖浏览器通道",
-			f"如需登录，请使用 {login_action_for_ctx(ctx)}；命中风控时停止自动化访问",
+			"如需登录，请使用 boss login；命中风控时停止自动化访问",
 		)
 
 	# 5.6) Optional low-frequency live read probes
-	live_probe_risk: str | None = None
 	if live_probe and risk_lock["locked"]:
 		add_check("live_probe", "warn", "本地风险锁未解除，未执行在线只读探测")
 	elif live_probe:
-		live_probe_risk = _add_live_probe_checks(ctx, auth, checks)
-		if live_probe_risk is not None:
-			# 风控异常会把本地锁写进 data_dir；刷新快照，避免报告里仍显示“未记录风控锁”。
-			fresh_lock = lock_status(Path(data_dir)) if platform_name == "zhipin" else {"locked": False}
-			if fresh_lock.get("locked"):
-				risk_lock = fresh_lock
-				updated = _risk_lock_check_payload(fresh_lock, clean_command=clean_lock_command)
-				for index, item in enumerate(checks):
-					if item["name"] == "cdp_risk_lock":
-						checks[index] = updated
-						break
+		_add_live_probe_checks(ctx, auth, checks)
 
 	# 6) Data dir writable
 	try:
@@ -310,23 +253,18 @@ def doctor_cmd(ctx: click.Context, live_probe: bool, probe_cookies: bool) -> Non
 			operator_actions.append(
 				f"本地登录态损坏；确认需要重建后，先执行 {_doctor_command(ctx, 'logout')}，再执行 {login_command}"
 			)
-		elif live_probe_risk is None:
+		else:
 			next_actions.append(_doctor_command(ctx, "status", "--live"))
 			operator_actions.append("可选择执行一次 status --live，只读验证当前登录态；不是诊断时自动发起的请求")
 			if auth_quality and auth_quality["status"] == "warn":
 				operator_actions.append(
 					f"缺少 {config.secondary_token_label}；若状态异常，先在官方页面确认，再决定是否执行 {login_command} 重建登录态"
 				)
-	if not cdp_ok and live_probe_risk is None:
+	if not cdp_ok:
 		next_actions.append(_doctor_command(ctx, "doctor", cdp_url=cdp_url or DEFAULT_CDP_URL))
 		operator_actions.append("如需 CDP，请先确认目标浏览器及调试端口已就绪，再重新诊断；不要反复重试")
-	if live_probe_risk is not None:
-		# 风控命中后不再建议任何会触发平台请求的后续动作，停止指引以统一契约为准。
-		_, recovery_action, risk_hints = platform_error_contract(live_probe_risk, ctx=ctx)
-		next_actions.extend((risk_hints or {}).get("next_actions") or [])
-		operator_actions.append(f"在线只读探测命中平台风控（{live_probe_risk}）：{recovery_action}")
 	if risk_lock["locked"]:
-		operator_actions.extend(unlock_operator_actions(clean_lock_command))
+		operator_actions.extend(UNLOCK_OPERATOR_ACTIONS)
 	if not any(item["name"] == "cookie_extract" and item["status"] == "ok" for item in checks):
 		operator_actions.append(f"需要提取本地登录态时，先在本机浏览器的 {config.site_host} 官方页面完成登录")
 	if source_root is not None:
@@ -338,7 +276,6 @@ def doctor_cmd(ctx: click.Context, live_probe: bool, probe_cookies: bool) -> Non
 		"auth_state": auth_health.auth_state,
 		"data_dir": str(data_dir),
 		"live_probe": live_probe,
-		"live_probe_risk": live_probe_risk,
 		"cdp_risk_lock": risk_lock,
 		"check_count": len(checks),
 		"checks": checks,

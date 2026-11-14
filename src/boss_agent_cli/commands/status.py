@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Any
 
 import click
 
@@ -7,16 +6,7 @@ from boss_agent_cli.api.request_budget import risk_lock_status as lock_status
 from boss_agent_cli.auth.health import assess_auth_health
 from boss_agent_cli.auth.manager import AuthManager
 from boss_agent_cli.commands._platform import get_platform_instance
-from boss_agent_cli.display import (
-	auth_required_hints,
-	boss_command_for_ctx,
-	handle_auth_errors,
-	handle_error_output,
-	handle_output,
-	handle_platform_error_output,
-	login_action_for_ctx,
-	render_status,
-)
+from boss_agent_cli.display import handle_auth_errors, handle_error_output, handle_output, login_action_for_ctx, render_status
 
 
 @click.command("status")
@@ -31,14 +21,7 @@ def status_cmd(ctx: click.Context, live: bool) -> None:
 	auth = AuthManager(data_dir, logger=logger, platform=platform_name)
 
 	token = auth.check_status()
-	auth_health = assess_auth_health(
-		data_dir,
-		platform=platform_name,
-		token=token,
-		login_action=login_action_for_ctx(ctx),
-		logout_action=boss_command_for_ctx(ctx, "logout", include_data_dir=True),
-		status_action=boss_command_for_ctx(ctx, "status", include_data_dir=True),
-	)
+	auth_health = assess_auth_health(data_dir, platform=platform_name, token=token)
 	if token is None:
 		login_action = login_action_for_ctx(ctx)
 		handle_error_output(
@@ -46,7 +29,7 @@ def status_cmd(ctx: click.Context, live: bool) -> None:
 			code="AUTH_REQUIRED",
 			message=f"未登录，请先执行 {login_action}",
 			recoverable=True, recovery_action=login_action,
-			hints={"auth_health": auth_health.public_summary(), "checks": auth_health.checks_as_dicts(), **auth_required_hints(ctx)},
+			hints={"auth_health": auth_health.public_summary(), "checks": auth_health.checks_as_dicts()},
 		)
 		return
 
@@ -64,72 +47,47 @@ def status_cmd(ctx: click.Context, live: bool) -> None:
 	}
 
 	if not live:
-		status_hints: dict[str, Any] = {
-			"next_actions": _status_next_actions(ctx, auth_health.auth_state),
-			"live_probe": f"运行 {boss_command_for_ctx(ctx, 'status --live', include_data_dir=True)} 执行一次只读在线验证",
-		}
-		status_operator_actions = _status_operator_actions(auth_health.auth_state, login_action=login_action_for_ctx(ctx))
-		if status_operator_actions:
-			status_hints["operator_actions"] = status_operator_actions
-		handle_output(
-			ctx,
-			"status",
-			data,
-			render=lambda payload: render_status(payload, login_action=login_action_for_ctx(ctx)),
-			hints=status_hints,
-		)
-		return
-
-	with get_platform_instance(ctx, auth) as platform:
-		info = platform.user_info()
-		if not platform.is_success(info):
-			# 错误码按登记表给出 recoverable / recovery_action；风控码的停止指引
-			# 由风险契约覆盖，本地健康检查随 extra_hints 一并带回。
-			handle_platform_error_output(
-				ctx,
-				"status",
-				platform,
-				info,
-				fallback_message="用户信息获取失败",
-				extra_hints={"auth_health": auth_health.public_summary(), "checks": auth_health.checks_as_dicts()},
-			)
-			return
-		user_info = platform.unwrap_data(info) or {}
-		user_name = user_info.get("name", "未知用户")
-		data["user_name"] = user_name
-		# 非 live 的下一步正是 `--live`；在线验证本身成功后不能到此为止，
-		# 否则 Agent 做完健康检查拿不到任何可执行的业务命令（TTY 里也只有一行
-		# 「logged in」，真人同样不知道该干什么）。
 		handle_output(
 			ctx,
 			"status",
 			data,
 			render=lambda payload: render_status(payload, login_action=login_action_for_ctx(ctx)),
 			hints={
-				"next_actions": [
-					boss_command_for_ctx(ctx, "recommend", include_data_dir=True),
-					boss_command_for_ctx(ctx, "search <关键词>", include_data_dir=True),
-				],
-				"operator_actions": ["登录态在线验证通过，可以直接开始浏览推荐职位或搜索职位"],
+				"next_actions": _status_next_actions(auth_health.auth_state, login_action=login_action_for_ctx(ctx)),
+				"live_probe": "运行 boss status --live 执行一次只读在线验证",
 			},
+		)
+		return
+
+	with get_platform_instance(ctx, auth) as platform:
+		info = platform.user_info()
+		if not platform.is_success(info):
+			code, message = platform.parse_error(info)
+			handle_error_output(
+				ctx,
+				"status",
+				code=code,
+				message=message or "用户信息获取失败",
+				recoverable=False,
+				hints={"auth_health": auth_health.public_summary(), "checks": auth_health.checks_as_dicts()},
+			)
+			return
+		user_info = platform.unwrap_data(info) or {}
+		user_name = user_info.get("name", "未知用户")
+		data["user_name"] = user_name
+		handle_output(
+			ctx,
+			"status",
+			data,
+			render=lambda payload: render_status(payload, login_action=login_action_for_ctx(ctx)),
 		)
 
 
-def _status_next_actions(ctx: click.Context, auth_state: str) -> list[str]:
-	# hints.next_actions 只放能直接执行的命令；`&&` 组合与「先启动带调试端口的
-	# 浏览器」这类前置条件属于操作者指引，见 _status_operator_actions。
-	login_action = login_action_for_ctx(ctx)
-	live_action = boss_command_for_ctx(ctx, "status --live", include_data_dir=True)
+def _status_next_actions(auth_state: str, *, login_action: str) -> list[str]:
 	if auth_state == "complete":
-		return [live_action]
+		return ["boss status --live — 可选执行一次只读在线验证"]
 	if auth_state == "partial":
-		return [f"{login_action} --cdp", live_action]
+		return ["以 Chrome 远程调试端口启动浏览器后运行 boss login --cdp", "boss status --live — 验证部分登录态是否仍可读"]
 	if auth_state == "broken":
-		return [boss_command_for_ctx(ctx, "logout", include_data_dir=True), login_action]
-	return [login_action]
-
-
-def _status_operator_actions(auth_state: str, *, login_action: str) -> list[str]:
-	if auth_state == "partial":
-		return [f"想走 CDP 复用浏览器时，先用远程调试端口启动 Chrome，再执行 {login_action} --cdp"]
-	return []
+		return [f"boss logout && {login_action} — 重建登录态"]
+	return [f"{login_action} — 建立登录态"]

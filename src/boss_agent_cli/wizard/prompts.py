@@ -6,13 +6,12 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence, cast
+from typing import Any, Mapping, Protocol, Sequence, cast
 
 import click
 
 from boss_agent_cli.wizard.catalog import GOALS, catalog_data
 from boss_agent_cli.wizard.models import WizardInput, WorkflowInputError
-from boss_agent_cli.wizard.runner import has_blocked_step
 
 
 @dataclass(frozen=True)
@@ -55,10 +54,6 @@ class MenuDriver(Protocol):
 	) -> str: ...
 
 	def text(self, label: str, *, default: str = "", required: bool = True) -> str: ...
-
-
-# 结果列表的后续输入构造函数签名一致：菜单驱动、列表项、平台名。
-_FollowUpBuilder = Callable[[MenuDriver, Mapping[str, Any], str], WizardInput | None]
 
 
 _BACK = "__wizard_back__"
@@ -344,6 +339,7 @@ class PromptToolkitMenu:
 			clear_wizard_screen()
 		items = _augment_menu_options(options, allow_back=allow_back, allow_exit=allow_exit)
 		selected = _default_select_index(items, default)
+		content_label_w, nav_label_w = _menu_label_widths(items)
 
 		def content() -> list[tuple[str, str]]:
 			return _menu_content_lines(items, selected=selected, title=title)
@@ -555,9 +551,6 @@ def _collect_control(
 		"stop": {"pending", "running", "waiting_input"},
 	}[action]
 	runs = [run for run in available_runs if str(run.get("status")) in allowed_statuses]
-	if action in {"resume", "retry"}:
-		# 结果未确认的失败任务不能靠恢复重跑，只在状态视图里展示。
-		runs = [run for run in runs if not has_blocked_step(run)]
 	# Status view: also include waiting shells that already have a completed live crawl.
 	if action == "status":
 		seen = {str(run.get("run_id")) for run in runs}
@@ -605,8 +598,6 @@ def _collect_control(
 				inner = data.get("run_id")
 		if inner:
 			description = f"{description} · 采集 {inner}"
-		if action == "status" and has_blocked_step(run):
-			description = f"{description} · 结果未确认，需人工核对"
 		options.append(MenuOption(str(run["run_id"]), label, description))
 	run_id = menu.select("请选择任务", options, default=options[0].value, allow_back=True)
 	return WizardControl(action=action, run_id=run_id)
@@ -765,22 +756,12 @@ def _runs_with_status(available_runs: Sequence[Mapping[str, Any]], statuses: set
 	return [run for run in available_runs if str(run.get("status")) in statuses]
 
 
-def _resumable_runs(available_runs: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-	statuses = {"pending", "running", "waiting_input", "failed"}
-	return [
-		run
-		for run in available_runs
-		if str(run.get("status")) in statuses and not has_blocked_step(run)
-	]
-
-
 def _main_menu_options(available_runs: Sequence[Mapping[str, Any]]) -> list[MenuOption]:
 	"""Only expose resume/retry/stop when matching unfinished tasks exist."""
 	options = [MenuOption("new", "开始新任务", "选择身份、平台和目标")]
-	resumable = _resumable_runs(available_runs)
-	if resumable:
+	if _runs_with_status(available_runs, {"pending", "running", "waiting_input", "failed"}):
 		options.append(MenuOption("resume", "恢复已有任务", "从上次未完成的位置继续"))
-	if any(str(run.get("status")) == "failed" for run in resumable):
+	if _runs_with_status(available_runs, {"failed"}):
 		options.append(MenuOption("retry", "重试失败任务", "重新执行失败的步骤"))
 	if available_runs:
 		options.append(MenuOption("status", "查看任务状态", "查看最近任务进度"))
@@ -1213,9 +1194,7 @@ def _recruiter_job_follow_up(menu: MenuDriver, item: Mapping[str, Any], platform
 	)
 
 
-def _resolve_list_follow_up(
-	run: Mapping[str, Any],
-) -> tuple[list[Mapping[str, Any]], str, _FollowUpBuilder] | None:
+def _resolve_list_follow_up(run: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], str, Any] | None:
 	"""Return (items, result_kind, follow_up_builder) for a completed list-like run."""
 	role = str(run.get("role") or "")
 	goal = str(run.get("goal") or "")

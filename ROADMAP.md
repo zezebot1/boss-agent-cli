@@ -4,26 +4,6 @@
 
 ## 已发布
 
-- ✅ v3.4.11（2026-11-15）：Windows 内核安装指引按目标 shell 引用解释器路径，含空格等字符时使用 PowerShell 调用运算符；浏览器内核诊断遵循 `PLAYWRIGHT_BROWSERS_PATH`，支持相对路径与包内缓存，显式配置时不再混入默认缓存。
-- ✅ v3.4.10（2026-11-14）：`boss-mcp` 默认使用同一安装的 `boss` 入口，MCP 主机用绝对路径启动且不继承 shell `PATH` 时工具调用不再全部 `CLI_ERROR`；`CRAWL_UNAVAILABLE` 与 `boss-mcp` 缺 SDK 的安装指引带上当前已有的依赖组，`uv tool install` 补装 `crawl` / `mcp` 不再互相顶替；便携包内核安装改用运行 boss 的解释器。
-- ✅ v3.4.9（2026-11-14）：工具式安装（`uv tool install` / `pipx install`）下的浏览器内核安装指引改用运行 boss 的同一解释器，信封恢复命令、向导文案与文档不再给出 PATH 上不存在的裸命令；`boss doctor` 的 patchright 检查按解释器导入判断，内核缺失判定为 `error`，向导登录门的内核预检恢复拦截。
-- ✅ v3.4.8（2026-11-14）：默认安装缺少 MCP SDK 时，`boss-mcp` 输出明确的依赖安装说明并以 1 退出，stdout 保持为空；SDK 可用时保留原服务器参数与传输行为，新旧入口的工具目录逐名一致，双语排障文档同步。
-- ✅ v3.4.7（2026-11-14）：采集入口在创建任务、启动后台进程或读取登录态之前检查 `crawl` 可选依赖，缺失时返回 `CRAWL_UNAVAILABLE` 与安装指引，不再返回成功信封并引导反复恢复；向导与终端文案同步，已保存的采集结果仍可离线读取。
-- ✅ v3.4.6（2026-11-14）：后台采集在创建任务与启动进程前检查登录态，未登录时返回 `AUTH_REQUIRED` 而不再留下永久排队的任务；没能接手的后台进程把原因写回任务，排队超过启动窗口的任务可用后台恢复重新启动；`agent crawl --query` 与其他采集入口一样向采集浏览器注入登录态。
-- ✅ v3.4.5（2026-11-14）：采集显式后台恢复解除旧停止请求，并能从进程突然退出后遗留的 `running` 状态续跑，保留页面断点与累计预算；HTML / JSON 简历导出的通用失败指引按实际格式分流；Agent 快速上手补齐采集并发契约，Node 回归脚本统一启动期限。
-- ✅ v3.4.4（2026-11-14）：workflow 与采集任务阻止同一运行的重叠执行；写步骤在结果确认前中断后不再重放，无法重放的失败不再提示恢复；采集退出信号保留可恢复断点；输出路径在平台请求前校验全部祖先目录；浏览器内核缺失、简历导出失败与本地文件错误指引按实际原因分流。
-- ✅ v3.4.3（2026-11-14）：MCP 在创建子进程期间取消时保留子进程 checkpoint 与 `run_id`，创建失败同时被取消时恢复指引改指安装 / `--boss-bin`；`boss_wizard` 的非法 `action` 在进入 CLI 前返回 `INVALID_PARAM`，不再静默新建运行；离线评估改为验证当前平台风控停止契约；发布后安装验收定向刷新目标包索引。
-- ✅ v3.4.2（2026-11-13）：浏览器非 JSON 写响应、批量招呼和 wizard 的未知写结果不再自动重放，信封统一声明 `replay_safe`；单次、批量与 wizard 的结果核对指引按角色保留数据目录，风控停止与浏览器来源耗尽的恢复提示同样保留上下文；MCP 枚举参数保留显式空串，子命令选择错误时先提示查看帮助。
-- ✅ v3.4.1（2026-11-13）：MCP 导出保留显式空串、配置工具遵守必填参数；`CLI_ERROR` 恢复提示区分未启动与读写操作；只读工具带 action 维度却漏登记写模式时按写处理；`ai local status` 按字面渲染配置；采集响应结构异常保留原断点，向导自动重试复用内部任务及计数预算。
-- ✅ v3.4.0（2026-11-13）：扫码登录风险错误补本地脱敏诊断（失败阶段 / 事件来源 / 白名单路径，不输出网址与正文）；TTY 终端渲染与 Markdown 导出对平台外部字符串按字面转义（markup 注入与链接 / 图片 / 原始 HTML 语法）；采集配置与后继提示保留数据目录；数据目录与登录态 / AI 密钥文件收紧为仅当前用户可读；`stats` / `interviews` / `cities` / `platforms` / 招聘者 / AI / 招聘自动化 / 简历 / 导出 / 历史 / 配置 / 投递 / 收藏 / 推荐 / 搜索 / 沟通 / 流水线等全部命令族的后继与恢复提示保留数据目录（自定义 `--data-dir` 下照抄提示不再写错目录）；MCP 空备注清空、`boss_hr_jobs` 按参数判定写操作；采集断点恢复 / 翻页截断 / 简历性别 / 面试时间 / `--dry-run` 污染 / 缓存提示复用等约 45 项缺陷修正。
-- ✅ v3.3.0（2026-11-12）：新增招聘者 `hr location` 工作地点卡片（默认预览、`--yes` 确认、本地去重）；`hr chatmsg` / `chatmsg` / `chat-summary` / `me --section deliver` / 招聘者四个列表命令 / `hr jobs list` / `chat --page` / `history` / `favorites list` 统一返回分页证据；MCP 工具补齐 CLI 已有参数并以 `inputSchema` 校验类型、拒绝未声明参数；登录恢复、采集后继与清理预演提示保留数据目录；职位描述缓存加容量上限，`clean --all` 覆盖负隅表；截断 / 脱敏 / fail-open 等一批静默变形问题修正。
-- ✅ v3.2.2（2026-11-09）：`ACTION_UNCONFIRMED` 诊断补齐 WS 无文本帧计数（`ws_send_without_text`）与历史回读漏斗计数（`history_new_count` / `history_self_count` / `history_recipient_count`），便于定位「已送达却未确认」的发送；同时新增公开架构文档、ADR 索引与命令参考目录，整理维护者文档与路线图。
-- ✅ v3.2.1（2026-11-06）：招聘者回复在新会话上先填内容再检查编辑器、多行消息保留换行（社区 PR #728），发送前改为有上限轮询并复查目标会话；`ACTION_UNCONFIRMED` 失败详情补上历史回读证据；发版工作流在发布前校验产物与 tag
-- ✅ v3.2.0（2026-11-01）：`--industry` 改用平台行业码、`--experience` / `--salary` 码位按网页筛选器校正；新增「全国」等 4 个城市码；命令兜底改报不可恢复的 `INTERNAL_ERROR`；`login --cookie-source` 提取失败给出可执行诊断（Breaking Change：行业码迁移）
-- ✅ v3.1.0（2026-10-30）：新增 `--browser-source httpx-only`（结构上不打开浏览器）、统一 httpx / Chromium 出口代理、页面 token 身份采集与出口地区探测、`boss doctor` 请求间隔检查、搜索结果 `job_url`、招聘者 `hr whoami`
-- ✅ v3.0.1（2026-10-23）：招聘者在线简历接口下线改报 `ENDPOINT_DEPRECATED` 并在 `details.tracking_issue` 指向跟踪 Issue；CDP 回读兼容弹层内部的 Vue 实例，`hr resume` 请求参数按现行接口修正
-- ✅ v3.0.0（2026-10-02）：移除 Browser Bridge 与智联招聘平台，BOSS 直聘成为唯一注册平台（保留 Platform 抽象）；浏览器通道改为 CDP → headless（Breaking Change）
-- ✅ v2.0.1（2026-09-29）：`boss chat` 公开跨请求稳定的 `uid`，`chatmsg` / `chat-summary` / `mark` / `exchange` 与快照、导出改用 `uid` 主键，避免动态 `securityId` 轮换导致联系人查找失败
 - ✅ v2.0.0（2026-09-15）：公开可严格限界的 `--browser-source` 并贯通 CLI / config / schema / MCP / wizard；新增 `login --force`、CDP 登录态只读有效性探测与 cURL 凭据导入；补齐招聘者推荐建联及附件简历接收下载；统一账号/环境风控的立即终止语义；移除未完成的前程无忧 / 51job 占位平台与 Atlas 展示位/provider 接入（Breaking Change）
 - ✅ v1.20.0（2026-09-03）：适配 mcp 2.x Server API（依赖 `mcp>=2.1.0,<3.0.0`，MCP 线格式未变）+ 修复设了 SOCKS 系统代理时每一条 httpx 命令都失败 + 浏览器通道选择收敛为策略表驱动的单一分发点（#387 seam 前置）+ `boss ai config` 回显解析后的实际端点 + AI provider 准入与移除规则成文
 - ✅ v1.19.1（2026-08-27）：修复全新安装解析到 mcp 2.x 导致 `boss-mcp` 直接崩溃（依赖收紧为 `<2.0.0`），并新增不走 `uv.lock` 的 `fresh_install` CI 门禁
@@ -33,7 +13,7 @@
 - ✅ v1.16.0（2026-07-17）：显式 `operating_mode` 双模式契约（`assisted` / `research`）+ 合规护栏升级为不可变能力策略注册表，CLI / schema / MCP 过滤从同一真源派生
 - ✅ v1.15.0（2026-07-14）：`boss ai cover-letter` 求职信草稿 + 死配置键与死码清理 + 智联页面域名校验加固（精确 hostname 匹配）
 - ✅ v1.14.0（2026-06-25）：shortlist 本地标签 / 备注 / 离线对比 + `ai fit` / `ai suggest-keywords` / `ai resume-optimize` + 转向 MCP-first + 搜索 `match_score`
-- ✅ v1.13.x（2026-06-11 ~ 06-16）：platforms 能力状态语义 + login 链路错误码补齐 + welfare 详情本地缓存 + 双语 README 重构为导航型；Agent Skill 迁出至独立仓库 boss-skill（Breaking Change）
+- ✅ v1.13.x（2026-06-11 ~ 06-16）：platforms 能力状态语义 + login 链路错误码补齐 + welfare 详情本地缓存 + 双语 README 重构为导航型；Agent Skill 迁出至独立仓库 [boss-skill](https://github.com/can4hou6joeng4/boss-skill)（Breaking Change）
 - ✅ v1.12.0（2026-06-09）：MCP 三种传输（stdio / SSE / HTTP streaming）+ `boss_export` + 51job / `qiancheng` 占位适配器
 - ✅ v1.11.0（2026-04-23）：招聘者模式（`--role recruiter`）全套 CLI 命令组 + `BossRecruiterClient` 双通道客户端 + `RecruiterPlatform` 抽象
 - ✅ v1.10.x（2026-04-21）：Platform 抽象落地 —— ABC + 注册表 + `--platform` 全局选项 + 20 个命令全量迁移，`commands/` 下不再直接引用 `BossClient`
@@ -43,7 +23,7 @@
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-## ✅ 近期（已完成）
+## 🎯 近期（当前主线）
 
 ### 数据可视化
 - [x] `boss stats --format html` 输出交互式漏斗报表（v1.7.1）
@@ -60,11 +40,11 @@
 - [x] `boss ai interview-prep` — 基于 JD 生成模拟面试题（v1.8.0）
 - [x] 支持 Claude 4.7 / GPT-5 最新模型（v1.8.2，provider 扩至 openrouter/qwen/zhipu/siliconflow）
 
-## 🔮 中期（v2.x–v3.x）
+## 🔮 中期（v2.0）
 
 ### 治理与合规
-- [x] 默认低风险辅助模式（历史项，已被 2026-08 开放能力设计取代）：ADR 0001 曾把敏感命令默认阻断并交接回平台官网；当前 `assisted` / `research` 对已实现能力权限一致，真正的边界是平台风控硬边界与有界长流程
-- [x] 显式 `operating_mode` 双模式契约（历史项，v1.16.0 / ADR 0002，已被 2026-08 开放能力设计取代）：两个模式名仅作配置兼容保留，权限一致，不再产生模式级 `COMPLIANCE_BLOCKED` 或 schema / MCP 模式过滤
+- [x] 默认低风险辅助模式：敏感命令默认阻断并交接回平台官网（ADR 0001）
+- [x] 显式 `operating_mode` 双模式契约：`assisted` / `research` 单一真源驱动 CLI、schema 与 MCP 过滤（v1.16.0，ADR 0002）
 - [x] 受限 Research Mode 采集：固定请求 / 详情 / 墙钟 / 重试预算 + SQLite checkpoint + 停止开关（v1.17.0）
 
 ### 架构演进
@@ -74,7 +54,7 @@
 - [x] 移除 Browser Bridge daemon、Chrome 扩展及可选依赖（v3.0.0）；保留 CDP / headless 浏览器通道，不再推进 Bridge 协议升级
 
 ### 生态扩展
-- [ ] Web UI（React + Tailwind），适合非 Agent 用户（未排期）
+- [ ] Web UI（React + Tailwind），适合非 Agent 用户
 - [ ] 多平台支持：Platform 抽象已落地（Week 1a–1c）；拉勾 / 猎聘 API 调研已完成（Issue #90 已闭环 · [docs/research/platforms/](docs/research/platforms/)），经评估不建议接入；智联适配器曾接入（候选者侧 + 招聘者 agent 自动化），已在 v3.0.0 移除，BOSS 直聘为当前唯一注册平台。
   - [x] Week 1a：Platform ABC 骨架 + BossPlatform adapter（#129，零行为变化）
   - [x] Week 1b：`--platform` 全局 CLI 选项 + `get_platform_instance` helper + schema 暴露 current_platform

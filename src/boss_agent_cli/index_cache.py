@@ -4,10 +4,9 @@
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from boss_agent_cli.output import Logger
-from boss_agent_cli.services.json_files import write_json_atomic
 
 _CACHE_FILE = "index_cache.json"
 
@@ -16,7 +15,7 @@ def _cache_path(data_dir: Path) -> Path:
 	return data_dir / "cache" / _CACHE_FILE
 
 
-def save_index(data_dir: Path, jobs: list[dict[str, Any]], source: str = "search", page: int | None = None) -> None:
+def save_index(data_dir: Path, jobs: list[dict[str, Any]], source: str = "search") -> None:
 	"""保存搜索/推荐结果到索引缓存。"""
 	entries = []
 	for job in jobs:
@@ -39,23 +38,20 @@ def save_index(data_dir: Path, jobs: list[dict[str, Any]], source: str = "search
 
 	cache_data = {
 		"source": source,
-		"page": page,
 		"count": len(entries),
 		"saved_at": time.time(),
 		"jobs": entries,
 	}
 
 	path = _cache_path(data_dir)
-	write_json_atomic(path, cache_data)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	path.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def try_save_index(
-	data_dir: Path, jobs: list[dict[str, Any]], *, source: str = "search",
-	page: int | None = None, logger: Logger | None = None,
-) -> bool:
+def try_save_index(data_dir: Path, jobs: list[dict[str, Any]], *, source: str = "search", logger: Logger | None = None) -> bool:
 	"""Best-effort 保存索引缓存，失败时记录 warning，不影响主命令成功返回。"""
 	try:
-		save_index(data_dir, jobs, source=source, page=page)
+		save_index(data_dir, jobs, source=source)
 		return True
 	except OSError as e:
 		if logger:
@@ -64,25 +60,14 @@ def try_save_index(
 
 
 def _load_cache(data_dir: Path) -> dict[str, Any] | None:
-	"""读取索引缓存；缺文件、解析失败或结构不对都返回 None。
-
-	缓存是 `boss show <编号>` 的唯一数据源，结构损坏时按「没有缓存」处理，
-	让用户重新 `boss search`，而不是把 AttributeError 兜成 INTERNAL_ERROR
-	（那条指引会让人去升级版本 / 提 issue，而真正该做的是重跑搜索）。
-	"""
+	"""读取索引缓存；缺文件或解析失败返回 None。"""
 	path = _cache_path(data_dir)
 	if not path.exists():
 		return None
 	try:
-		loaded = json.loads(path.read_text(encoding="utf-8"))
-	except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+		return cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
+	except (json.JSONDecodeError, OSError):
 		return None
-	if not isinstance(loaded, dict):
-		return None
-	jobs = loaded.get("jobs", [])
-	if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
-		return None
-	return loaded
 
 
 def get_job_by_index(data_dir: Path, index: int) -> dict[str, Any] | None:
@@ -92,42 +77,21 @@ def get_job_by_index(data_dir: Path, index: int) -> dict[str, Any] | None:
 		return None
 
 	jobs = cache_data.get("jobs", [])
-	if not isinstance(jobs, list) or index < 1 or index > len(jobs):
+	if index < 1 or index > len(jobs):
 		return None
 
-	job = jobs[index - 1]
-	return job if isinstance(job, dict) else None
+	return cast("dict[str, Any]", jobs[index - 1])
 
 
 def get_index_info(data_dir: Path) -> dict[str, Any]:
-	"""获取缓存元信息（来源、页码、数量、保存时间）。"""
+	"""获取缓存元信息（来源、数量、保存时间）。"""
 	cache_data = _load_cache(data_dir)
 	if cache_data is None:
-		return {"exists": False, "source": "", "page": None, "count": 0, "saved_at": 0}
+		return {"exists": False, "source": "", "count": 0, "saved_at": 0}
 
 	return {
 		"exists": True,
 		"source": cache_data.get("source", ""),
-		"page": cache_data.get("page"),
 		"count": cache_data.get("count", 0),
 		"saved_at": cache_data.get("saved_at", 0),
-	}
-
-
-def get_index_snapshot(data_dir: Path) -> dict[str, Any] | None:
-	"""返回当前索引快照的身份信息；没有可用缓存时返回 None。
-
-	`boss show <编号>` 的编号只在这份快照内有效，`search` / `recommend` 成功
-	写入后把它附在分页信息里，调用方才能对照 `show` 返回的 `index_snapshot`
-	判断手里的编号是否已被新的搜索覆盖。`page` 让多页搜索的编号也能区分页码，
-	旧版本写入的缓存没有该字段，这里按 None 返回。
-	"""
-	info = get_index_info(data_dir)
-	if not info["exists"]:
-		return None
-	return {
-		"source": info["source"],
-		"page": info["page"],
-		"count": info["count"],
-		"saved_at": info["saved_at"],
 	}

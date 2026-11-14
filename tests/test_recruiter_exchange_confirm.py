@@ -80,23 +80,18 @@ def _ws(*bits):
 
 
 def test_page_ok_without_evidence_is_action_unconfirmed_not_unexpected_page_result():
-	# 页面脚本显式返回 error: null，以前 setdefault 不生效，信封只剩页面错误默认文案。
+	# 页面脚本显式返回 error: null，以前 setdefault 不生效，信封只剩 unexpected page result。
 	client, _ = _client(page=_page(), events=[_ws("/message/suggest")])
 	result = client.exchange_request_by_friend(FRIEND_ID, exchange_type=4)
 	assert result["code"] == -1
-	assert "页面未返回可用的结果" not in result["message"]
+	assert "unexpected page result" not in result["message"]
 	assert result["__cli_error_code__"] == "ACTION_UNCONFIRMED"
 	assert f"boss hr chatmsg {FRIEND_ID}" in result["message"]
 	details = result["__cli_error_details__"]
 	assert details["log"] == ["handleExChange returned", "confirm clicked=True"]
 	assert details["confirmed"] is True
 	assert details["componentName"] == "ExchangeResume"
-	assert details["ws_evidence"] == {
-		"event_count": 1,
-		"ws_send_count": 1,
-		"ws_send_without_text": 0,
-		"matched_ws_count": 0,
-	}
+	assert details["ws_evidence"] == {"event_count": 1, "ws_send_count": 1, "matched_ws_count": 0}
 	assert details["history_checked"] is True
 	assert details["history_matched_count"] == 0
 	client.close()
@@ -278,7 +273,7 @@ def test_cli_envelope_carries_action_unconfirmed_and_details():
 	error = json.loads(result.output)["error"]
 	assert error["code"] == "ACTION_UNCONFIRMED"
 	assert error["recoverable"] is False
-	assert "页面未返回可用的结果" not in error["message"]
+	assert "unexpected page result" not in error["message"]
 	assert error["details"]["componentName"] == "ExchangeResume"
 	assert error["details"]["ws_evidence"]["matched_ws_count"] == 0
 	assert "log" in error["details"]
@@ -288,7 +283,7 @@ def test_cli_envelope_carries_action_unconfirmed_and_details():
 def test_page_failure_still_surfaces_real_error_in_details():
 	client, _ = _client(page={"ok": False, "error": "ExchangeWx Vue component not found", "log": ["geekClick called"]})
 	result = client.exchange_request_by_friend(FRIEND_ID, exchange_type=2)
-	assert result["message"] == "交换联系方式请求失败: ExchangeWx Vue component not found"
+	assert result["message"] == "exchange_request_by_friend failed: ExchangeWx Vue component not found"
 	assert "__cli_error_code__" not in result
 	assert result["__cli_error_details__"]["log"] == ["geekClick called"]
 	assert BossRecruiterPlatform(client).parse_error(result)[0] == "UNKNOWN"
@@ -427,58 +422,3 @@ def test_action_card_json_in_ws_frame_is_attempt_only():
 	client, _ = _client(page=_page("ExchangeWx", "not_required"), events=[_ws(frame.replace("32", "37"))])
 	assert client.exchange_request_by_friend(FRIEND_ID, exchange_type=2)["__cli_error_code__"] == "ACTION_UNCONFIRMED"
 	client.close()
-
-
-def test_exchange_thrown_action_is_interrupted_and_unconfirmed():
-	"""handleExChange 抛错时请求可能已发出（Issue #990）。
-
-	此前该分支不带 ``action_interrupted``，响应被判 ``UNKNOWN``，招聘自动化把它
-	当普通失败标 ``blocked``，下一轮 ``agent run`` 会重发同一次交换请求。
-	"""
-	client, _ = _client(page={"ok": False, "action_interrupted": True, "error": "handleExChange threw: boom", "log": []})
-	result = client.exchange_request_by_friend(FRIEND_ID, exchange_type=2)
-	assert result["code"] == -1
-	assert result["__cli_error_code__"] == "ACTION_UNCONFIRMED"
-	assert "boss hr chatmsg" in result["message"]
-	client.close()
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="需要 node 运行页面脚本")
-@pytest.mark.parametrize("mode", ["sync_throw", "async_reject", "missing", "disabled"])
-def test_exchange_script_distinguishes_interrupted_and_unsent_actions(tmp_path, mode):
-	"""实际脚本区分调用后抛错与发送前拦截，抛错后不再点击确认。"""
-	probe = f"""
-	const mode = {json.dumps(mode)};
-	const AsyncFunction = Object.getPrototypeOf(async function() {{}}).constructor;
-	const invoke = new AsyncFunction(
-		'args', 'findVueComponent', 'exchangeAvailability', 'snapshotConfirmState',
-		'sleep', 'clickPrimaryConfirm', 'log', {json.dumps(rc._EXCHANGE_ACTION_JS)}
-	);
-	let handles = 0, confirms = 0;
-	const vm = {{type: 2, handleExChange() {{
-		handles++;
-		if (mode === 'async_reject') return Promise.reject(new Error('boom'));
-		throw new Error('boom');
-	}}}};
-	const result = await invoke(
-		{{componentName: 'ExchangeWx', checkAvailability: true}},
-		() => mode === 'missing' ? null : vm,
-		() => ({{state: mode === 'disabled' ? 'disabled' : 'enabled', signals: []}}),
-		() => ({{}}), async () => {{}}, () => {{ confirms++; return true; }}, []
-	);
-	process.stdout.write(JSON.stringify({{result, handles, confirms}}));
-	"""
-	path = tmp_path / "exchange-interruption.mjs"
-	path.write_text(probe, encoding="utf-8")
-	# 与其它 Node 回归同一预算：CI 冷启动卡顿可超过 5s（Issue #1029）。
-	output = subprocess.run(["node", str(path)], capture_output=True, text=True, timeout=30, check=True).stdout
-	data = json.loads(output)
-	assert data["result"]["ok"] is False
-	assert data["confirms"] == 0
-	if mode in {"sync_throw", "async_reject"}:
-		assert data["handles"] == 1
-		assert data["result"]["action_interrupted"] is True
-		assert data["result"]["componentName"] == "ExchangeWx"
-	else:
-		assert data["handles"] == 0
-		assert "action_interrupted" not in data["result"]

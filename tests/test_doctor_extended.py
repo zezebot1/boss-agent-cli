@@ -10,9 +10,6 @@ from unittest.mock import patch, MagicMock
 import pytest
 from click.testing import CliRunner
 from rich.console import Console
-from boss_agent_cli.api import cdp_risk_lock
-from boss_agent_cli.api.client import AccountRiskError, EnvironmentRiskError
-from boss_agent_cli.display import risk_error_contract
 from boss_agent_cli.main import cli
 
 
@@ -61,9 +58,6 @@ def _invoke_doctor(tmp_path=None, platform="zhipin", **overrides):
 		for key in ("cdp_url", "browser_source"):
 			if key in overrides:
 				cli_args.extend(["--" + key.replace("_", "-"), overrides[key]])
-		# 默认给一个高于实测可持续节奏的间隔：request_delay 检查只在配置确实
-		# 偏低时才 warn（见 docs/research/zhipin-cdp-free-read-path-2026-10-29.md）。
-		cli_args.extend(["--delay", overrides.get("delay", "45-90")])
 		cli_args.append("doctor")
 		if overrides.get("probe_cookies"):
 			cli_args.append("--probe-cookies")
@@ -103,18 +97,18 @@ def test_all_checks_pass(tmp_path):
 # ── 2. Python 版本不满足 ─────────────────────────────────────────────
 
 
-def test_python_version_below_311(tmp_path):
-	"""Python 版本低于 3.11 时 python 检查应为 error。"""
+def test_python_version_below_310(tmp_path):
+	"""Python 版本低于 3.10 时 python 检查应为 error。"""
 
 	class FakeVersionInfo(tuple):
 		"""模拟 sys.version_info：同时支持元组比较和属性访问。"""
 
 		major = 3
-		minor = 10
+		minor = 9
 		micro = 1
 
 		def __new__(cls):
-			return tuple.__new__(cls, (3, 10, 1))
+			return tuple.__new__(cls, (3, 9, 1))
 
 	original = sys.version_info
 	sys.version_info = FakeVersionInfo()
@@ -125,11 +119,11 @@ def test_python_version_below_311(tmp_path):
 	python_check = _find_check(parsed["data"]["checks"], "python")
 	assert python_check is not None
 	assert python_check["status"] == "error"
-	assert "3.11" in python_check["detail"]
+	assert "3.10" in python_check["detail"]
 
 
 def test_python_version_satisfies(tmp_path):
-	"""当前测试运行的 Python 应满足 >=3.11。"""
+	"""当前测试运行的 Python 应满足 >=3.10。"""
 	code, parsed = _invoke_doctor(tmp_path)
 	python_check = _find_check(parsed["data"]["checks"], "python")
 	assert python_check["status"] == "ok"
@@ -138,55 +132,13 @@ def test_python_version_satisfies(tmp_path):
 # ── 3. 依赖缺失 ─────────────────────────────────────────────────────
 
 
-@patch("boss_agent_cli.commands.doctor.patchright_importable", return_value=False)
-def test_patchright_missing(mock_importable, tmp_path):
-	"""patchright 无法导入时应为 warn；判定以解释器导入为准，不看 PATH。"""
+@patch("boss_agent_cli.commands.doctor.shutil.which", return_value=None)
+def test_patchright_missing(mock_which, tmp_path):
+	"""patchright 可执行文件不在 PATH 中时应为 warn。"""
 	code, parsed = _invoke_doctor(tmp_path)
 	pr_check = _find_check(parsed["data"]["checks"], "patchright")
 	assert pr_check["status"] == "warn"
-	assert "无法导入" in pr_check["detail"]
-
-
-def test_patchright_check_does_not_depend_on_path(tmp_path, monkeypatch):
-	"""回归（Issue #1060）：`uv tool install` 只暴露 boss / boss-mcp，patchright
-	不在 PATH 上，但它就在运行 CLI 的解释器里，doctor 不能误报缺失。"""
-	import boss_agent_cli.commands.doctor as doctor_module
-
-	monkeypatch.setattr(doctor_module.shutil, "which", lambda name: None)
-	_code, parsed = _invoke_doctor(tmp_path)
-	pr_check = _find_check(parsed["data"]["checks"], "patchright")
-	assert pr_check["status"] == "ok"
-
-
-def test_doctor_kernel_install_hint_is_executable_in_this_installation(tmp_path):
-	"""内核安装提示必须用运行 CLI 的解释器，而不是 PATH 上的裸 patchright。
-
-	`uv tool install boss-agent-cli` 之后 `patchright` 不在 PATH，裸命令 rc=127；
-	提示里的解释器必须存在，且 `-m patchright` 可以导入。
-	"""
-	import re as re_module
-	import shlex
-	import subprocess
-	import sys
-	from pathlib import Path
-
-	_code, parsed = _invoke_doctor(tmp_path)
-	pr_check = _find_check(parsed["data"]["checks"], "patchright_chromium")
-	command = next(
-		token
-		for token in re_module.findall(r"(\S+ -m patchright install [^\s；]+)", pr_check["detail"])
-	)
-	argv = shlex.split(command)
-	assert argv[0] == sys.executable
-	assert Path(argv[0]).exists()
-	probe = subprocess.run(
-		[argv[0], "-m", "patchright", "--version"],
-		capture_output=True,
-		text=True,
-		timeout=120,
-		check=False,
-	)
-	assert probe.returncode == 0, probe.stderr
+	assert "未找到" in pr_check["detail"]
 
 
 # ── 4. 网络不通 ──────────────────────────────────────────────────────
@@ -741,151 +693,6 @@ def test_doctor_live_probe_reads_recruiter_api_when_identity_is_recruiter(tmp_pa
 	recruiter.list_jobs.assert_called_once()
 
 
-def _run_live_probe(
-	tmp_path,
-	*,
-	platform_user_info=None,
-	platform_side_effect=None,
-	platform_is_success=True,
-	platform_parse_error=None,
-	recruiter_side_effect=None,
-):
-	"""执行 doctor --live-probe，返回 (信封, platform mock, recruiter mock, 原始输出)。"""
-	paths = _base_patches()
-	runner = CliRunner()
-	with (
-		patch(paths["auth"]) as mock_auth,
-		patch(paths["cdp"]) as mock_cdp,
-		patch(paths["httpx"]) as mock_httpx,
-		patch(paths["cookie"]) as mock_cookie,
-		patch("boss_agent_cli.commands._doctor_checks.get_platform_instance") as mock_platform_cls,
-		patch("boss_agent_cli.commands._doctor_checks.get_recruiter_platform_instance") as mock_recruiter_cls,
-	):
-		mock_auth.return_value.check_status.return_value = {"cookies": {"wt2": "tok"}, "stoken": "st"}
-		mock_cdp.return_value = None
-		mock_cookie.return_value = None
-		mock_httpx.return_value = MagicMock(status_code=200)
-
-		platform = mock_platform_cls.return_value
-		platform.__enter__ = lambda self: self
-		platform.__exit__ = lambda self, *a: None
-		platform.is_success.return_value = platform_is_success
-		if platform_side_effect is not None:
-			platform.user_info.side_effect = platform_side_effect
-		else:
-			platform.user_info.return_value = (
-				platform_user_info if platform_user_info is not None else {"zpData": {"identity": 1, "recruit": False}}
-			)
-		if platform_parse_error is not None:
-			platform.parse_error.return_value = platform_parse_error
-
-		recruiter = mock_recruiter_cls.return_value
-		recruiter.__enter__ = lambda self: self
-		recruiter.__exit__ = lambda self, *a: None
-		recruiter.is_success.return_value = True
-		if recruiter_side_effect is not None:
-			recruiter.list_jobs.side_effect = recruiter_side_effect
-		else:
-			recruiter.list_jobs.return_value = {"zpData": {"list": []}}
-
-		result = runner.invoke(cli, ["--data-dir", str(tmp_path), "doctor", "--live-probe"])
-
-	assert result.exit_code == 0, result.output
-	return json.loads(result.output), platform, recruiter, result.output
-
-
-def test_doctor_live_probe_stops_after_candidate_risk(tmp_path):
-	"""求职者探测命中风控后不得再请求招聘者接口，也不透传异常文本。"""
-	parsed, _, recruiter, output = _run_live_probe(
-		tmp_path,
-		platform_side_effect=EnvironmentRiskError("平台响应包含 secret-risk-text"),
-	)
-
-	check = _find_check(parsed["data"]["checks"], "candidate_live_user_info")
-	assert check["status"] == "warn"
-	assert "ENVIRONMENT_RISK" in check["detail"]
-	assert check["recovery_action"] == risk_error_contract(
-		"ENVIRONMENT_RISK",
-		clean_command=f"boss --data-dir {tmp_path.resolve()} clean --risk-lock",
-		doctor_command=f"boss --data-dir {tmp_path.resolve()} doctor",
-	)[0]
-	assert "secret-risk-text" not in output
-
-	skipped = _find_check(parsed["data"]["checks"], "recruiter_live_read")
-	assert skipped is not None and "风控" in skipped["detail"]
-	recruiter.list_jobs.assert_not_called()
-
-	assert parsed["data"]["live_probe_risk"] == "ENVIRONMENT_RISK"
-	next_actions = parsed["hints"]["next_actions"]
-	assert not any("--live" in action for action in next_actions)
-	assert any("不要刷新 Token" in action for action in next_actions)
-	# ENVIRONMENT_RISK 的解锁命令在 recovery_action 里：必须指向本次诊断的数据目录（Issue #978）。
-	assert f"boss --data-dir {tmp_path.resolve()} clean --risk-lock" in parsed["data"]["checks"][0].get(
-		"recovery_action", ""
-	) or any(
-		f"boss --data-dir {tmp_path.resolve()} clean --risk-lock" in str(item.get("recovery_action") or "")
-		for item in parsed["data"]["checks"]
-	)
-	assert any("在线只读探测命中平台风控" in action for action in parsed["hints"]["operator_actions"])
-
-
-def test_doctor_live_probe_stops_after_recruiter_risk(tmp_path):
-	"""招聘者探测命中账号风控时同样立即停止，并按统一契约给出停止指引。"""
-	parsed, _, recruiter, output = _run_live_probe(
-		tmp_path,
-		recruiter_side_effect=AccountRiskError("平台响应包含 secret-account-text"),
-	)
-
-	check = _find_check(parsed["data"]["checks"], "recruiter_live_read")
-	assert check["status"] == "warn"
-	assert "ACCOUNT_RISK" in check["detail"]
-	assert check["recovery_action"] == risk_error_contract(
-		"ACCOUNT_RISK",
-		clean_command=f"boss --data-dir {tmp_path.resolve()} clean --risk-lock",
-		doctor_command=f"boss --data-dir {tmp_path.resolve()} doctor",
-	)[0]
-	assert "secret-account-text" not in output
-	assert parsed["data"]["live_probe_risk"] == "ACCOUNT_RISK"
-	assert any("不要通过 CDP" in action for action in parsed["hints"]["next_actions"])
-	recruiter.list_jobs.assert_called_once()
-
-
-def test_doctor_live_probe_risk_response_does_not_continue(tmp_path):
-	"""探测返回风控响应码（而非抛异常）时，同样不再发下一条请求。"""
-	parsed, platform, recruiter, _ = _run_live_probe(
-		tmp_path,
-		platform_user_info={"code": 37, "message": "环境异常"},
-		platform_is_success=False,
-		platform_parse_error=("ENVIRONMENT_RISK", "环境异常"),
-	)
-
-	check = _find_check(parsed["data"]["checks"], "candidate_live_user_info")
-	assert check["status"] == "warn"
-	assert "ENVIRONMENT_RISK" in check["detail"]
-	assert _find_check(parsed["data"]["checks"], "recruiter_live_read") is not None
-	recruiter.list_jobs.assert_not_called()
-	assert parsed["data"]["live_probe_risk"] == "ENVIRONMENT_RISK"
-	assert any("不要刷新 Token" in action for action in parsed["hints"]["next_actions"])
-	platform.is_success.assert_called_once()
-
-
-def test_doctor_live_probe_refreshes_risk_lock_after_risk(tmp_path):
-	"""风控异常会写本地锁；doctor 的报告和解锁指引必须反映这次写入。"""
-
-	def _write_lock_then_raise():
-		cdp_risk_lock.write_lock(tmp_path, None, now=1, reason="ENVIRONMENT_RISK", platform_code=37)
-		raise EnvironmentRiskError("boom")
-
-	parsed, _, _, _ = _run_live_probe(tmp_path, platform_side_effect=_write_lock_then_raise)
-
-	assert parsed["data"]["cdp_risk_lock"]["locked"] is True
-	lock_check = _find_check(parsed["data"]["checks"], "cdp_risk_lock")
-	assert lock_check["status"] == "warn"
-	assert "ENVIRONMENT_RISK" in lock_check["detail"]
-	clean_action = next(action for action in parsed["hints"]["operator_actions"] if "clean --risk-lock" in action)
-	assert f"boss --data-dir {tmp_path.resolve()} clean --risk-lock" in clean_action
-
-
 def test_cookie_completeness_missing_zp_at(tmp_path):
 	"""zp_at 缺失时应报 warn。"""
 	token = {"cookies": {"wt2": "t", "wbg": "1"}, "stoken": "st"}
@@ -913,7 +720,7 @@ def test_doctor_login_preflight_blocks_missing_auth_before_platform_requests(tmp
 	assert preflight is not None
 	assert preflight["status"] == "error"
 	assert "禁止发起需要认证的平台请求" in preflight["detail"]
-	assert preflight["recovery_action"] == f"boss --data-dir {tmp_path.resolve()} login"
+	assert "boss login" in preflight["recovery_action"]
 
 
 def test_doctor_login_preflight_warns_on_partial_auth(tmp_path):
@@ -952,7 +759,6 @@ def test_windows_playwright_cache_dir_uses_localappdata(tmp_path, monkeypatch):
 	"""Windows 默认 ms-playwright 缓存应纳入 doctor 检测。"""
 	from boss_agent_cli.services.browser_runtime import patchright_browser_cache_dirs
 
-	monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
 	local_app_data = tmp_path / "AppData" / "Local"
 	monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
 
@@ -987,9 +793,7 @@ def test_evaluate_patchright_chromium_requires_exact_revision(tmp_path):
 		tmp_path / "chromium_headless_shell-1217",
 	]
 	status, detail = evaluate_patchright_chromium("1208", installed)
-	# 内核缺失是确定性失败：doctor 用 error 让 summary 变成 broken，而不是
-	# 让用户以为只是「有点小问题」（Issue #1060）。
-	assert status == "error"
+	assert status == "warn"
 	assert "chromium-1208" in detail
 	assert "boss login" in detail
 
@@ -1004,9 +808,9 @@ def test_evaluate_patchright_chromium_reports_missing_headless_shell(tmp_path):
 
 	status, detail = evaluate_patchright_chromium("1223", [tmp_path / "chromium-1223"])
 
-	assert status == "error"
+	assert status == "warn"
 	assert "chromium_headless_shell-1223" in detail
-	assert "-m patchright install chromium-headless-shell" in detail
+	assert "patchright install chromium-headless-shell" in detail
 
 
 def test_evaluate_patchright_chromium_falls_back_without_manifest(tmp_path):

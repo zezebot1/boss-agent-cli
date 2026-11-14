@@ -2,9 +2,7 @@
 
 Thanks for your interest in `boss-agent-cli`! This guide is the English companion of [CONTRIBUTING.md](CONTRIBUTING.md) — both describe the same workflow, so pick whichever fits you.
 
-Before your first contribution, complete the local preflight and developer verification in [Getting Started](docs/getting-started.en.md). Before changing code, read [Architecture](docs/architecture.en.md) to understand the envelope contract, platform abstraction and risk boundary.
-
-By participating (issues, pull requests, discussions) you agree to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+Before your first contribution, complete the local preflight and developer verification in [Getting Started](docs/getting-started.en.md).
 
 ## Development Environment
 
@@ -18,13 +16,13 @@ uv run pytest tests/ -v
 uv run pre-commit install
 ```
 
-Python **≥ 3.11** is required. We use [`uv`](https://github.com/astral-sh/uv) for dependency management — `uv sync --all-extras` installs runtime + dev deps in a local `.venv`.
+Python **≥ 3.10** is required. We use [`uv`](https://github.com/astral-sh/uv) for dependency management — `uv sync --all-extras` installs runtime + dev deps in a local `.venv`.
 
 ## Coding Standards
 
 - Python source indentation uses **tabs**.
 - `indent-width = 4` in `pyproject.toml` is the formatter display width. It does not mean Python files should switch to spaces.
-- Use Python >= 3.11 and `X | Y` union syntax.
+- Use Python >= 3.10 and `X | Y` union syntax.
 - Command output must preserve the JSON envelope contract: stdout is agent-readable JSON only, stderr is logs and progress.
 - Commit messages use the repository Chinese format `type: 中文描述`.
 - Type checking is blocking in CI. New code must pass `uv run mypy src/boss_agent_cli`.
@@ -35,27 +33,14 @@ Python **≥ 3.11** is required. We use [`uv`](https://github.com/astral-sh/uv) 
 
 ## Local Verification
 
-Before submitting code changes, run the one-shot gate (ruff + full offline test suite + mypy):
-
-```bash
-uv run python scripts/quality_baseline.py
-```
-
-Run individual steps only to narrow down a failure:
+Run the full matrix before submitting code changes:
 
 ```bash
 uv run pytest tests/ -q
-uv run ruff check src/ tests/ scripts/ mcp-server/
+uv run ruff check src/ tests/
 uv run mypy src/boss_agent_cli
 uv run boss --help
 uv run boss schema --format native
-```
-
-Before opening a PR, also run the offline smoke contract and the MCP eval (the eval must run in a standalone terminal, not nested inside an Agent session):
-
-```bash
-BOSS_SMOKE_DRY_RUN=1 uv run python scripts/smoke_p0.py
-uv run python evals/run_eval.py --mode fixture
 ```
 
 For documentation-only changes, run at least:
@@ -85,7 +70,7 @@ Before investing in promotion, examples, or integrations, check those passive si
    ```
 5. **Commit** atomically — one logical change per commit.
 6. **Push** and open a PR against `master`.
-7. **CI green** is a hard prerequisite before merge: the `CI` workflow runs ruff / mypy / pre-commit and tests on Python 3.11, 3.12, 3.13 and 3.14 for every PR (fork PRs included, no secrets needed), plus CodeQL and GitGuardian scans. Tests are fully offline; don't add tests that need the network, a real browser or a real account.
+7. **CI green** is a hard prerequisite before merge: the `CI` workflow runs ruff / mypy / pre-commit and tests on Python 3.10, 3.12 and 3.14 for every PR (fork PRs included, no secrets needed), plus CodeQL and GitGuardian scans. Tests are fully offline; don't add tests that need the network, a real browser or a real account.
 
 Maintainers will `squash merge`, so the squash title must follow the commit convention above.
 
@@ -94,24 +79,18 @@ Maintainers will `squash merge`, so the squash title must follow the commit conv
 - [Release Checklist](docs/maintainer/release-checklist.md)
 - [Labels And Triage](docs/maintainer/labels.md)
 - [Branch Protection](docs/maintainer/branch-protection.md)
-- [Smoke Testing](docs/maintainer/smoke-testing.md)
-- [README Badge Policy](docs/maintainer/readme-badge-policy.md)
-- [Architecture Decisions](docs/adr/README.md)
 
 ## Adding a New Command
 
-1. Create a command module under `src/boss_agent_cli/commands/`; put reusable business logic that does not depend on Click or display in `services/`
+1. Create a file under `src/boss_agent_cli/commands/`
 2. Register it in `commands/register.py` (`register_candidate_commands` / `register_recruiter_commands`; `main.py` only holds global options and does not attach commands directly)
 3. Describe it in `src/boss_agent_cli/schema/data.py` (under `SCHEMA_DATA["commands"]`); when the top-level command count changes, also update the "共 N 个顶层命令" count inside `SCHEMA_DATA["description"]` (a test asserts the count matches the command table length)
-4. Add success and error tests in `tests/test_commands.py` or a new file matching the command name, and check the envelope contract in `tests/test_cli_invariants.py`
+4. Add tests in `tests/test_commands.py` or a new file matching the command name
 5. Update `docs/commands.md` and `docs/commands.en.md` (command cheat-sheet)
-6. Update the command counts in `docs/capability-matrix.md` / `docs/capability-matrix.en.md`; `tests/test_agent_docs.py` hard-codes these count strings, so update it in the same change
-7. Update `README.md` and `README.en.md` (command reference table and counts), together with the capability counts in `llms.txt` / `demo/llms.txt` and `demo/index.html`
-8. Add each new Python module to the strict module list under `[[tool.mypy.overrides]]` in `pyproject.toml`, then run `uv run mypy src/boss_agent_cli`
-9. To expose the command through MCP, add its Tool definition to `TOOLS` in `src/boss_agent_cli/mcp_tools.py` and its argument mapping to `_build_args` in `src/boss_agent_cli/mcp_args.py`. When the tool name does not map onto its compliance command identifier (e.g. `boss_hr_*` maps to `recruiter-*`), register it in `_MCP_TOOL_COMPLIANCE_COMMAND_OVERRIDES` in `mcp_tools.py`. `mcp_server.py` holds the server and compatibility re-exports, and `mcp-server/server.py` maintains an explicit re-export list; update both when adding a compatibility public symbol. When the tool count changes, update "MCP server with N tools" in `README.en.md` and the other capability counts. Check that the actual `tools/list` names exactly match `mcp_tools.TOOLS`: `uv run pytest tests/test_mcp_server_protocol.py tests/test_mcp_handler_registration.py -q`
-10. Record the change under `[Unreleased]` in `CHANGELOG.md`
-
-`AGENTS.md` / `CLAUDE.md` are local guidance files excluded by `.gitignore` and are not required in contribution PRs; public engineering and architecture conventions are documented here and in the [architecture guide](docs/architecture.en.md).
+6. Update `AGENTS.md` (command-count invariant) and the command counts in `docs/capability-matrix.md` / `docs/capability-matrix.en.md`; `tests/test_agent_docs.py` hard-codes these count strings, so update it in the same change
+7. Update `README.md` and `README.en.md` (command reference table)
+8. Update the relevant module's `CLAUDE.md`
+9. If the command is useful for Agents via MCP, also register it in `src/boss_agent_cli/mcp_server.py` (add a Tool to the `TOOLS` list and a branch in `_build_args`); when the tool name does not map onto its compliance command identifier (e.g. `boss_hr_*` tools map to `recruiter-*`), register it in `_MCP_TOOL_COMPLIANCE_COMMAND_OVERRIDES` or the low-risk filtering will not apply; `mcp-server/server.py` is a hand-maintained re-export list — add a line for each new public symbol; when the tool count changes, update "MCP server with N tools" in `README.en.md` (a test asserts it against `len(TOOLS)`)
 
 ## Output Contract (Do Not Break)
 
@@ -141,18 +120,6 @@ On error, the envelope must contain `error.code`, `error.recoverable`, and `erro
 - **TDD encouraged**: write the test before the implementation. For coverage, run `uv run pytest --cov=boss_agent_cli` locally.
 - **Mock external I/O**: `AuthManager`, `BossClient`, `CacheStore`, and `AIService` are mock boundaries — tests should not hit the real BOSS Zhipin API.
 - **Error-path parity**: for every success path, add at least one error path test (auth expired, rate-limited, invalid param, etc.).
-
-## Offline MCP evals
-
-`evals/` contains a fixture-first, reproducible evaluation that compares an MCP agent using this CLI with a baseline agent using recorded evidence across four scenarios (welfare filtering, detail + shortlist, platform risk stop, error recovery). Pass criteria and failure signals per scenario are listed in the scenario table in [`evals/README.md`](evals/README.md).
-
-The default `fixture` mode is fully offline: no platform calls and no login state. **Run it from an independent terminal — do not nest it inside Claude Code / Codex or other agent sessions**, where it can hang or produce false "0 trigger" results.
-
-```bash
-uv run python evals/run_eval.py --mode fixture
-```
-
-Expected output is `4/4 passed`; results are written to `evals/results/<timestamp>-fixture.json`. The suite is local evidence, not a CI job.
 
 ## Adding an AI Provider
 
@@ -216,4 +183,4 @@ You don't need to write code to help:
 
 ## Questions?
 
-Open a [Discussion](https://github.com/can4hou6joeng4/boss-agent-cli/discussions) or comment on a related [Issue](https://github.com/can4hou6joeng4/boss-agent-cli/issues). For every channel and what to include, see [Getting Support](SUPPORT.en.md).
+Open a [Discussion](https://github.com/can4hou6joeng4/boss-agent-cli/discussions) or comment on a related [Issue](https://github.com/can4hou6joeng4/boss-agent-cli/issues).

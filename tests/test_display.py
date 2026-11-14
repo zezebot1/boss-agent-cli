@@ -1,46 +1,19 @@
 """Tests for display.py — TTY detection, renderers, auth error decorator."""
 
 import io
-import re
-import shlex
 import sys
 from unittest.mock import patch, MagicMock
-from urllib.parse import urlparse
 
-import pytest
 from rich.console import Console
 
-from boss_agent_cli.api.browser_urls import is_zhipin_url
 from boss_agent_cli.display import (
 	boss_command_for_ctx,
 	is_json_mode,
-	json_forced,
 	handle_output,
 	handle_error_output,
 	handle_auth_errors,
-	handle_platform_error_output,
 	login_action_for_ctx,
-	risk_error_message,
-	shell_argument,
 )
-from boss_agent_cli.services.browser_runtime import patchright_install_command
-
-
-_HTTP_URL = re.compile(r"https?://[^\s<>\"']+")
-
-
-def _has_official_zhipin_url(text: str) -> bool:
-	"""操作提示里的官网地址按 hostname 判断，不用子串包含。
-
-	``"www.zhipin.com" in text`` 会把 ``www.zhipin.com.evil.example`` 或查询参数里的
-	同名片段也算进去。这里只接受抽出来的 URL，再交给 ``is_zhipin_url``。
-	"""
-	for raw in _HTTP_URL.findall(text):
-		url = raw.rstrip("，。；、,.)]")
-		host = urlparse(url).hostname
-		if host and is_zhipin_url(url):
-			return True
-	return False
 
 
 def _capture_display_console(monkeypatch):
@@ -77,25 +50,6 @@ class TestIsJsonMode:
 			assert is_json_mode(None) is True
 
 
-class TestJsonForced:
-	"""`--json` 与「stdout 被管道接走」必须区分：前者是硬契约，后者是人工重定向。"""
-
-	def test_explicit_flag(self):
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True}
-		assert json_forced(ctx) is True
-
-	def test_piped_stdout_alone_does_not_count(self):
-		ctx = MagicMock()
-		ctx.obj = {"json_output": False}
-		with patch.object(sys, "stdout") as mock_out:
-			mock_out.isatty.return_value = False
-			assert json_forced(ctx) is False
-
-	def test_none_ctx(self):
-		assert json_forced(None) is False
-
-
 class TestHandleOutput:
 	def test_json_mode_emits_json(self):
 		ctx = MagicMock()
@@ -122,29 +76,6 @@ class TestHandleErrorOutput:
 			handle_error_output(ctx, "test", code="ERR", message="bad")
 			mock_emit.assert_called_once()
 
-	def test_tty_mode_redacts_credentials_like_json_mode(self):
-		"""TTY 分支原先直接打印 message，异常文本里的凭据会明文出现在终端（Issue #880）。"""
-		import boss_agent_cli.display as display_module
-
-		ctx = MagicMock()
-		ctx.obj = {"json_output": False}
-		buffer = io.StringIO()
-		safe_console = Console(file=buffer, width=200, color_system=None)
-		with patch.object(sys.stdout, "isatty", return_value=True), patch.object(
-			display_module, "console", safe_console
-		):
-			with pytest.raises(SystemExit):
-				handle_error_output(
-					ctx,
-					"test",
-					code="NETWORK_ERROR",
-					message="token=DEMO leaked",
-					recovery_action="检查 cookie=DEMO 后重试",
-				)
-		output = buffer.getvalue()
-		assert "DEMO" not in output
-		assert "[REDACTED]" in output
-
 
 class TestHandleAuthErrors:
 	def test_browser_source_unavailable_uses_policy_error_contract(self):
@@ -167,51 +98,6 @@ class TestHandleAuthErrors:
 		assert kwargs["hints"]["operator_actions"] == list(
 			POLICIES["existing-browser"].operator_actions
 		)
-
-	def test_browser_source_unavailable_carries_data_dir_and_platform(self, tmp_path):
-		"""自定义 --data-dir 下策略里的 doctor / status --live 必须指向同一目录（Issue #980）。
-
-		裸 ``boss doctor`` 诊断的是默认目录的登录态与风险锁，照抄的 Agent 拿到的是
-		另一份本地状态。
-		"""
-		from boss_agent_cli.api.browser_source import BrowserSourceUnavailable, POLICIES
-
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True, "data_dir": tmp_path, "platform": "zhipin"}
-
-		@handle_auth_errors("chat")
-		def impl(ctx):
-			raise BrowserSourceUnavailable(POLICIES["existing-browser"], ("cdp",))
-
-		with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-			impl(ctx)
-
-		kwargs = mock_err.call_args.kwargs
-		doctor = f"boss --data-dir {shell_argument(str(tmp_path.resolve()))} doctor"
-		assert kwargs["recovery_action"] == doctor
-		assert kwargs["hints"]["next_actions"] == [doctor]
-
-	def test_httpx_only_policy_commands_are_rewritten_per_data_dir(self, tmp_path):
-		"""策略表文案里的 clean --risk-lock / login --cdp 也属于本地状态命令（Issue #980）。"""
-		from boss_agent_cli.api.browser_source import BrowserSourceUnavailable, POLICIES
-
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True, "data_dir": tmp_path, "platform": "zhipin"}
-
-		@handle_auth_errors("chat")
-		def impl(ctx):
-			raise BrowserSourceUnavailable(POLICIES["httpx-only"], ("httpx",))
-
-		with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-			impl(ctx)
-
-		kwargs = mock_err.call_args.kwargs
-		prefix = f"boss --data-dir {shell_argument(str(tmp_path.resolve()))}"
-		assert kwargs["hints"]["next_actions"] == [f"{prefix} status --live"]
-		recovery = kwargs["hints"]["operator_actions"][-1]
-		assert f"{prefix} clean --risk-lock" in recovery
-		assert f"{prefix} login --cdp" in recovery
-		assert " boss clean --risk-lock" not in recovery
 
 	def test_browser_source_unsupported_uses_not_supported_contract(self):
 		"""BrowserSourceUnsupported → NOT_SUPPORTED：recoverable / recovery_action 来自真源契约，
@@ -236,42 +122,6 @@ class TestHandleAuthErrors:
 		assert kwargs["hints"]["operator_actions"] == [
 			"该平台没有浏览器通道，改用默认 --browser-source auto 或切换到 zhipin",
 		]
-
-	def test_browser_navigation_error_uses_nav_timeout_contract(self):
-		from boss_agent_cli.api.browser_client import BrowserNavigationError
-
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True}
-		error = BrowserNavigationError(
-			"https://www.zhipin.com/",
-			attempts=2,
-			timeout_ms=15000,
-			channel="headless",
-			cause=TimeoutError("Page.goto: Timeout 15000ms exceeded"),
-		)
-
-		@handle_auth_errors("search")
-		def impl(ctx):
-			raise error
-
-		with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-			impl(ctx)
-
-		kwargs = mock_err.call_args.kwargs
-		assert kwargs["code"] == "BROWSER_NAV_TIMEOUT"
-		assert kwargs["recoverable"] is True
-		assert "boss login" in kwargs["recovery_action"]
-		assert "Page.goto" not in kwargs["message"]
-		assert kwargs["details"]["channel"] == "headless"
-		assert kwargs["details"]["attempts"] == 2
-		assert "boss doctor" in kwargs["hints"]["next_actions"]
-		assert any(_has_official_zhipin_url(action) for action in kwargs["hints"]["operator_actions"])
-
-	def test_official_zhipin_url_check_rejects_lookalike_hosts(self):
-		assert _has_official_zhipin_url("打开 https://www.zhipin.com/ 再请求")
-		assert not _has_official_zhipin_url("打开 https://www.zhipin.com.evil.example/ 再请求")
-		assert not _has_official_zhipin_url("打开 https://evil.example/?next=https://www.zhipin.com/")
-		assert not _has_official_zhipin_url("文本里出现 www.zhipin.com 但不是 URL")
 
 	def test_auth_required(self):
 		from boss_agent_cli.auth.manager import AuthRequired
@@ -389,14 +239,6 @@ class TestLoginActionForCtx:
 		ctx.obj = {"platform": "otherplat"}
 		assert boss_command_for_ctx(ctx, "status") == "boss --platform otherplat status"
 
-	def test_role_and_data_dir_are_kept_before_subcommand(self, tmp_path):
-		"""agent 等不在 hr 组下的招聘者命令必须在全局选项区保留角色。"""
-		ctx = MagicMock()
-		ctx.obj = {"data_dir": tmp_path, "platform": "zhipin"}
-		assert boss_command_for_ctx(ctx, "agent stats", include_data_dir=True, role="recruiter") == (
-			f"boss --data-dir {tmp_path.resolve()} --role recruiter agent stats"
-		)
-
 	def test_default_platform_uses_plain_login(self):
 		ctx = MagicMock()
 		ctx.obj = {}
@@ -431,42 +273,6 @@ class TestHandleErrorOutputTTY:
 			mock_out.isatty.return_value = True
 			with pytest.raises(SystemExit):
 				handle_error_output(ctx, "test", code="ERR", message="bad")
-
-	def test_tty_mode_recovery_falls_back_to_registry(self, monkeypatch):
-		"""只传 code / message 时 TTY 也要展示登记表里的恢复指引。"""
-		import pytest
-		from boss_agent_cli.schema.error_codes import ERROR_CODES
-
-		ctx = MagicMock()
-		ctx.obj = {"json_output": False}
-		stream = _capture_display_console(monkeypatch)
-		with patch.object(sys, "stdout") as mock_out:
-			mock_out.isatty.return_value = True
-			with pytest.raises(SystemExit):
-				handle_error_output(ctx, "test", code="NETWORK_ERROR", message="请求失败")
-
-		assert ERROR_CODES["NETWORK_ERROR"]["recovery_action"] in stream.getvalue()
-
-	@pytest.mark.parametrize("path", ["/tmp/jobs [x] team", "/tmp/jobs [/bold] team"])
-	def test_tty_mode_recovery_renders_bracket_paths_literally(self, monkeypatch, path):
-		"""恢复命令里的目录按字面显示：Rich 标签不能吞路径，未配对闭合标签也不能抛错。"""
-		ctx = MagicMock()
-		ctx.obj = {"json_output": False}
-		stream = _capture_display_console(monkeypatch)
-		with patch.object(sys, "stdout") as mock_out:
-			mock_out.isatty.return_value = True
-			with pytest.raises(SystemExit):
-				handle_error_output(
-					ctx,
-					"show",
-					code="INVALID_PARAM",
-					message="当前数据目录没有缓存的搜索结果",
-					recovery_action=f"先执行 boss --data-dir '{path}' search <关键词> 建立结果缓存",
-				)
-
-		output = stream.getvalue()
-		assert path in output
-		assert "recovery:" in output
 
 
 # ── handle_auth_errors AccountRiskError 分支 ─────────────────
@@ -505,75 +311,6 @@ class TestHandleAuthErrorsAccountRisk:
 			assert kwargs["recoverable"] is False
 			assert "客服" in kwargs["recovery_action"]
 
-	def test_account_risk_message_uses_registry_text(self):
-		"""风控信封不透传平台响应文本，只给错误码登记表里的稳定文案。"""
-		from boss_agent_cli.api.client import AccountRiskError
-
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True}
-
-		@handle_auth_errors("search")
-		def impl(ctx):
-			raise AccountRiskError("fixture-platform-response-token", is_cdp=True)
-
-		with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-			impl(ctx)
-			kwargs = mock_err.call_args[1]
-			assert kwargs["message"] == risk_error_message("ACCOUNT_RISK")
-			assert "fixture-platform-response-token" not in kwargs["message"]
-
-
-# ── handle_platform_error_output 风控分支 ─────────────────────
-
-
-class TestHandlePlatformErrorOutput:
-	def test_risk_code_message_uses_registry_text(self):
-		"""响应字典形态的风控码同样不透传平台响应原文。"""
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True}
-		platform = MagicMock()
-		platform.parse_error.return_value = ("ACCOUNT_RISK", "fixture-platform-response-token")
-
-		with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-			handle_platform_error_output(
-				ctx, "search", platform, {"code": 36}, fallback_message="搜索失败"
-			)
-			kwargs = mock_err.call_args[1]
-			assert kwargs["code"] == "ACCOUNT_RISK"
-			assert kwargs["message"] == risk_error_message("ACCOUNT_RISK")
-			assert "fixture-platform-response-token" not in kwargs["message"]
-
-	def test_non_risk_code_keeps_platform_message(self):
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True}
-		platform = MagicMock()
-		platform.parse_error.return_value = ("RATE_LIMITED", "请求过于频繁")
-
-		with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-			handle_platform_error_output(
-				ctx, "search", platform, {"code": 9}, fallback_message="搜索失败"
-			)
-			kwargs = mock_err.call_args[1]
-			assert kwargs["message"] == "请求过于频繁"
-
-	def test_unknown_code_uses_registered_recovery_action(self):
-		"""未识别的平台错误也要给出登记表里的恢复指引，不能是 null。"""
-		from boss_agent_cli.schema.error_codes import ERROR_CODES
-
-		ctx = MagicMock()
-		ctx.obj = {"json_output": True}
-		platform = MagicMock()
-		platform.parse_error.return_value = ("UNKNOWN", "服务开小差了")
-
-		with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-			handle_platform_error_output(
-				ctx, "search", platform, {"code": 999}, fallback_message="搜索失败"
-			)
-			kwargs = mock_err.call_args[1]
-		assert kwargs["code"] == "UNKNOWN"
-		assert kwargs["recoverable"] is False
-		assert kwargs["recovery_action"] == ERROR_CODES["UNKNOWN"]["recovery_action"]
-
 
 # ── 各 renderer 冒烟测试（调用不抛异常即可覆盖） ────────────
 
@@ -599,7 +336,6 @@ class TestRenderers:
 			title="jobs",
 			page=1,
 			hint_next="next hint",
-			show_command="boss show <#>",
 		)
 
 		output = stream.getvalue()
@@ -662,31 +398,6 @@ class TestRenderers:
 		output = stream.getvalue()
 		assert "next:" in output
 		assert "boss greet <security_id> <job_id>" in output
-
-	def test_render_job_detail_shows_index_snapshot_provenance(self, monkeypatch):
-		"""编号属于索引快照：详情下方要能看出它来自哪次搜索、保存时间。"""
-		from boss_agent_cli.display import render_job_detail
-		stream = _capture_display_console(monkeypatch)
-
-		render_job_detail({
-			"title": "Go", "salary": "20K", "index": 3,
-			"index_snapshot": {"source": "search:Golang", "page": 2, "count": 30, "saved_at": 1700000000.0},
-		})
-
-		output = stream.getvalue()
-		assert "#3" in output
-		assert "第 2 页" in output
-		assert "search:Golang" in output
-		assert "共 30 条" in output
-
-	def test_render_job_detail_omits_snapshot_line_without_metadata(self, monkeypatch):
-		"""detail 命令不带快照元信息时不应渲染空的溯源行。"""
-		from boss_agent_cli.display import render_job_detail
-		stream = _capture_display_console(monkeypatch)
-
-		render_job_detail({"title": "Go", "salary": "20K"})
-
-		assert "保存于" not in stream.getvalue()
 
 	def test_render_job_detail_truncates_long_description_at_500_chars(self, monkeypatch):
 		from boss_agent_cli.display import render_job_detail
@@ -1044,16 +755,6 @@ class TestRenderNextSteps:
 
 		assert stream.getvalue() == ""
 
-	@pytest.mark.parametrize("path", ["/tmp/jobs [bold] team", "/tmp/jobs [/bold] team"])
-	def test_renders_commands_with_rich_tags_literally(self, monkeypatch, path):
-		"""命令里的数据目录是原样文本：Rich 标签不能吞掉它或抛 MarkupError。"""
-		from boss_agent_cli.display import render_next_steps
-
-		stream = _capture_display_console(monkeypatch)
-		render_next_steps([f"boss --data-dir {path} config list"])
-
-		assert f"--data-dir {path} config list" in stream.getvalue()
-
 
 class TestRenderActionResult:
 	def test_shows_fields_and_next_steps(self, monkeypatch):
@@ -1247,104 +948,3 @@ def test_search_pipeline_progress_markers_contract():
 	assert "✅ {company} - {title}（详情匹配）" in content
 	assert "❌ {company} - {title}" in content
 	assert "预筛排除:" in content
-
-
-def test_shell_argument_quotes_only_when_needed():
-	"""提示里的用户输入只在会被 shell 解释时加引号，正常中文名不加。"""
-	assert shell_argument("我的简历") == "我的简历"
-	assert shell_argument("qwen3:14b") == "qwen3:14b"
-	assert shell_argument("我的 简历") == "'我的 简历'"
-	assert shell_argument("it's mind") == "'it'\\''s mind'"
-
-
-def test_shell_argument_quotes_shell_metacharacters():
-	"""落单的单引号会让提示变成非法 shell，通配符 / 变量 / 开头的 ~ 会被展开。
-
-	`boss resume show its'fine` 在终端里直接报「引号未闭合」——提示本身就是坏的；
-	`boss preset remove *` 则会被 glob 展开成当前目录下的文件名。
-	"""
-	assert shell_argument("its'fine") == "'its'\\''fine'"
-	assert shell_argument("全天*") == "'全天*'"
-	assert shell_argument("$HOME") == "'$HOME'"
-	assert shell_argument("~") == "'~'"
-	assert shell_argument("a~b") == "a~b"
-	for value in ("its'fine", "全天*", "$HOME", "~", "a;b", "x|y"):
-		assert shlex.split(shell_argument(value)) == [value]
-
-
-# ── 浏览器内核缺失：不能报成可重试的 NETWORK_ERROR ──────────────────────
-# patchright 升级后仍需对应修订版的 Chromium；找不到可执行文件时
-# `sync_playwright().start()` / `chromium.launch()` 抛 Playwright 原生错误。
-# 装饰器此前把它兜成 NETWORK_ERROR +「重试」，可重试永远不会成功，
-# Agent 会拿同一条命令反复打平台。登录链路早已把这条错误识别为
-# BROWSER_KERNEL_MISSING，命令层也必须用同一份契约。
-
-_KERNEL_MISSING_MESSAGES = [
-	"BrowserType.launch: Executable doesn't exist at "
-	"/Users/u/Library/Caches/ms-playwright/chromium_headless_shell-1248/"
-	"chrome-headless-shell-mac-arm64/chrome-headless-shell",
-	"Looks like Playwright was just installed or updated. "
-	"Please run the following command to download new browsers:\n\n    playwright install",
-]
-
-
-@pytest.mark.parametrize("message", _KERNEL_MISSING_MESSAGES)
-def test_browser_kernel_missing_uses_install_contract(message):
-	"""命令层捕获到内核缺失时必须给 BROWSER_KERNEL_MISSING + 安装指引。"""
-	ctx = MagicMock()
-	ctx.obj = {"json_output": True}
-
-	@handle_auth_errors("search")
-	def impl(ctx):
-		raise RuntimeError(message)
-
-	with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-		impl(ctx)
-
-	kwargs = mock_err.call_args.kwargs
-	install = patchright_install_command()
-	assert kwargs["code"] == "BROWSER_KERNEL_MISSING"
-	assert kwargs["recoverable"] is True
-	# 安装命令必须带运行本 CLI 的解释器：`uv tool install` 后裸 patchright 不在 PATH
-	# 上，照抄会 command not found（Issue #1060）。
-	assert kwargs["recovery_action"] == install
-	assert sys.executable in install
-	assert "-m patchright install chromium" in install
-	assert install in kwargs["hints"]["next_actions"]
-	assert not any("重试" == action for action in kwargs["hints"]["next_actions"])
-
-
-def test_browser_kernel_missing_hint_points_at_doctor_and_does_not_suggest_retry(tmp_path):
-	ctx = MagicMock()
-	ctx.obj = {"json_output": True, "data_dir": tmp_path, "platform": "zhipin"}
-
-	@handle_auth_errors("detail")
-	def impl(ctx):
-		raise RuntimeError("Executable doesn't exist at /nonexistent/chrome-headless-shell")
-
-	with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-		impl(ctx)
-
-	kwargs = mock_err.call_args.kwargs
-	actions = kwargs["hints"]["next_actions"]
-	assert actions[0] == patchright_install_command()
-	assert any("doctor" in action for action in actions)
-	assert kwargs["hints"]["operator_actions"]
-
-
-def test_unrelated_runtime_error_still_falls_back_to_network_error():
-	"""只有内核缺失这一种确定性失败改判；其余运行时错误保持原兜底。"""
-	ctx = MagicMock()
-	ctx.obj = {"json_output": True}
-
-	@handle_auth_errors("search")
-	def impl(ctx):
-		raise RuntimeError("upstream gateway returned 502")
-
-	with patch("boss_agent_cli.display.handle_error_output") as mock_err:
-		impl(ctx)
-
-	kwargs = mock_err.call_args.kwargs
-	assert kwargs["code"] == "NETWORK_ERROR"
-	assert kwargs["recoverable"] is True
-	assert kwargs["recovery_action"] == "重试"

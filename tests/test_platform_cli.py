@@ -66,8 +66,7 @@ class TestPlatformGlobalOption:
 		assert payload["command"] == "boss"
 		assert payload["error"]["code"] == "INVALID_PARAM"
 		assert payload["error"]["recoverable"] is False
-		assert payload["error"]["recovery_action"] == "用 boss --help 查看参数说明"
-		assert payload["hints"]["next_actions"] == ["boss --help"]
+		assert payload["error"]["recovery_action"] == "修正参数"
 		assert result.stderr == ""
 
 	@pytest.mark.parametrize("platform_name", ["qiancheng", "51job", "zhilian"])
@@ -82,10 +81,8 @@ class TestPlatformGlobalOption:
 		assert payload["command"] == "boss"
 		assert payload["error"]["code"] == "INVALID_PARAM"
 		assert payload["error"]["recoverable"] is False
-		assert payload["error"]["recovery_action"] == "用 boss --help 查看参数说明"
-		assert payload["hints"]["next_actions"] == ["boss --help"]
-		assert "不支持的平台" in payload["error"]["message"]
-		assert "可选: zhipin" in payload["error"]["message"]
+		assert payload["error"]["recovery_action"] == "修正参数"
+		assert "supported: zhipin" in payload["error"]["message"]
 
 	def test_schema_exposes_platform_option_in_global(self, runner: CliRunner) -> None:
 		from boss_agent_cli.main import cli
@@ -130,8 +127,7 @@ class TestPlatformGlobalOption:
 		assert rejected.exit_code == 1
 		payload = json.loads(rejected.output)
 		assert payload["error"]["code"] == "INVALID_PARAM"
-		assert "不支持的平台" in payload["error"]["message"]
-		assert "可选: zhipin" in payload["error"]["message"]
+		assert "supported: zhipin" in payload["error"]["message"]
 
 		repaired = runner.invoke(cli, ["--data-dir", str(tmp_path), "--platform", "zhipin", "config", "set", "platform", "zhipin"])
 		assert repaired.exit_code == 0, repaired.output

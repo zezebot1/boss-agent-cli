@@ -22,7 +22,7 @@ boss doctor --live-probe
 
 | Check | What it means |
 |-------|---------------|
-| `python` | Python ≥ 3.11 installed |
+| `python` | Python ≥ 3.10 installed |
 | `patchright_chromium` | The Chromium and headless shell revisions required by patchright are installed; Windows also checks `%LOCALAPPDATA%\ms-playwright` |
 | `windows_uv_tool_path` | Whether the global `uv tool` command directory is on PATH on Windows |
 | `quality_baseline` | Source checkout only: whether the local P0 quality script exists |
@@ -54,14 +54,6 @@ boss logout && boss login
 
 Stop the current workflow and retain its run ID or checkpoint. Resolve the login or security-page state before an explicit resume; do not retry through multiple transports.
 
-Risk errors in the QR login paths may include local context in `error.details.login_diagnostic`:
-
-- `origin` / `stage`: a page check, session probe or response event, and the login stage at observation time.
-- `top_path` / `open_pages`: an allowlisted top-level path and the current context's page count when available. Unknown paths use a placeholder; queries and fragments are never included.
-- Response events may also include `status`, `resource_type`, `is_navigation_request`, and `frame_scope` (`main_frame` / `child_frame` / `other_page` / `unknown`).
-
-Only existing page/response object properties are read: no extra requests, bodies, cookies, or tokens. Unavailable metadata is omitted or marked unknown. These fields do not establish that a response is harmless, login succeeded, or risk was resolved; stopping and lock persistence remain unchanged. This does not add a failure-window hold or automatic recovery mode.
-
 ### Migrating from Browser Bridge in v3.0.0
 
 The Browser Bridge daemon, Chrome extension, and `[bridge]` installation extra have been removed. `boss doctor` no longer probes the old daemon or reports extension checks.
@@ -86,78 +78,22 @@ boss logout && boss login
 
 ## Browser / patchright issues
 
-### Browser kernel install fails (`BROWSER_KERNEL_MISSING`)
-
-The kernel install command must use **the same interpreter that runs boss**.
-`uv tool install` / `pipx install` only put `boss` and `boss-mcp` on PATH and keep
-patchright inside the tool environment, so a bare `patchright install chromium`
-fails with `command not found` (Issue #1060). Both the envelope's
-`error.recovery_action` and `boss doctor` print a runnable command that includes the
-interpreter path — copy it as is:
+### `patchright install chromium` fails
 
 ```bash
-boss doctor                     # prints the runnable install command and the required revision
-# e.g. /path/to/python -m patchright install chromium
-
-# Extra troubleshooting when the install itself fails
 # macOS / Linux: ensure write access to ~/Library/Caches (macOS) or ~/.cache (Linux)
 # Windows: run as admin once
-<same interpreter> -m pip install --upgrade patchright
-<same interpreter> -m patchright install chromium --with-deps
-# If it reports a missing headless shell:
-<same interpreter> -m patchright install chromium-headless-shell
+pip install --upgrade patchright
+patchright install chromium --with-deps
+# If the global tool environment reports a missing headless shell:
+patchright install chromium-headless-shell
 ```
-
-On Windows, install guidance targets PowerShell. If the interpreter path contains spaces or special characters, the full command looks like `& 'C:\Program Files\Python\python.exe' -m patchright install chromium`; keep the leading `&`, which invokes the quoted path. If you are using cmd.exe, open PowerShell before running this form of command.
-
-When `PLAYWRIGHT_BROWSERS_PATH` is set, use the same environment setting for the kernel install, the CLI, `boss doctor`, and the wizard preflight; the preflight checks only that directory. Relative paths resolve against `INIT_CWD` (or the current directory when unset), and `0` selects `.local-browsers` inside the patchright driver package.
-
-The wizard's “Log in now” option uses the same authentication chain as `boss login`: it first tries to reuse an existing browser login and opens a QR browser only when needed. A missing patchright kernel does not block valid Cookie or existing CDP login; the wizard shows kernel installation guidance only after the QR fallback reports that the kernel is missing.
 
 ### `AUTH_REQUIRED` before live tests
 
 `AUTH_REQUIRED` means the selected data directory has no usable login session. It is
 not a CLI failure. Validate local commands, schema, MCP, and doctor first; run
 `boss login` before live `search`, `detail`, or `status --live` checks.
-
-### `boss-mcp` reports a missing MCP SDK
-
-The default `boss-agent-cli` install does not include the optional MCP SDK. When the SDK is missing, `boss-mcp` writes installation guidance to stderr and exits with code 1, leaving stdout empty; a host may only report that the connection closed. Add the dependency using your original installation method, then restart MCP:
-
-```bash
-pip install "boss-agent-cli[mcp]"
-# For a uv tool installation
-uv tool install "boss-agent-cli[mcp]"
-# Inside a source checkout
-uv sync --extra mcp
-```
-
-`uv tool install` rebuilds the tool environment from the extras you name and does not keep earlier ones: when `crawl` is already installed, list both (`uv tool install "boss-agent-cli[crawl,mcp]"`), otherwise adding MCP removes the crawl dependencies. The `boss-mcp` startup message and the `CRAWL_UNAVAILABLE` recovery guidance spell out the full requirement for the current environment; `pip install` is incremental and unaffected.
-
-You can also use the README's `uvx --from "boss-agent-cli[mcp]" boss-mcp` configuration directly. Missing dependencies inside the SDK and other server failures keep their original errors so you can diagnose the actual cause.
-
-### MCP tools return `CLI_ERROR`
-
-`CLI_ERROR` is a process-level failure between the MCP server and the underlying
-`boss` CLI, not a platform response:
-
-- **The CLI could not start** (`error.message` begins with `无法启动底层 boss CLI`):
-  `boss-mcp` defaults to the `boss` entry point from its own installation (next to
-  the interpreter running the server) and does not depend on the MCP host's `PATH`;
-  it falls back to a `PATH` lookup only when that entry point is missing. This error
-  means the sibling entry point is absent and `boss` is not on the MCP server
-  process's `PATH`, or the `--boss-bin` path is wrong or not executable. No platform operation happened
-  (`error.details.outcome_unknown=false`). Install `boss` into the MCP server's
-  environment or pass `boss-mcp --boss-bin /path/to/boss`; the README's
-  `uvx --from boss-agent-cli[mcp] boss-mcp` puts that environment's `boss` on `PATH`.
-- **The child ran but printed no JSON envelope**: read-only tools made no platform
-  write (`outcome_unknown=false`) — inspect `error.message`, upgrade to the latest
-  release, and retry; write tools have an unknown outcome (`outcome_unknown=true`) —
-  verify the actual platform state before retrying.
-
-Common `boss-mcp` startup flags: `--data-dir`, `--platform`, `--role`,
-`--browser-source`, `--boss-bin`, `--transport stdio|sse|http`; see
-`boss-mcp --help` for every default.
 
 ### Windows PATH and UTF-8
 
@@ -166,8 +102,6 @@ If `uv tool update-shell` times out, temporarily expose global tools in PowerShe
 ```powershell
 $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
 ```
-
-Permanently fixing it still means re-running `uv tool update-shell` on a stable network, or adding `C:\Users\<you>\.local\bin` to the user PATH by hand.
 
 For Chinese Windows test runs, force UTF-8:
 
@@ -191,8 +125,6 @@ curl http://localhost:9222/json/version
 # macOS users: make sure Chrome is fully quit first (⌘Q, not just close window)
 ```
 
-With CDP configured, `boss --cdp-url http://localhost:9222 doctor` checks the channel against that endpoint.
-
 ### CDP launch examples
 
 macOS:
@@ -209,24 +141,6 @@ Linux:
 google-chrome \
   --remote-debugging-port=9222 \
   --user-data-dir=/tmp/boss-chrome
-```
-
-Windows PowerShell:
-
-```powershell
-$chromeCandidates = @(
-  "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-  "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-  "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-)
-
-$chrome = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $chrome) { throw "Google Chrome executable was not found" }
-
-& $chrome `
-  --remote-debugging-port=9222 `
-  --remote-allow-origins=* `
-  --user-data-dir="$env:LOCALAPPDATA\boss-agent-cdp-profile"
 ```
 
 Then log in via CDP from another terminal:
@@ -368,41 +282,21 @@ Every error response contains `code`, `recoverable`, and `recovery_action`, so a
 | `WIZARD_INPUT_REQUIRED` | A headless workflow lacks role/platform/goal/inputs | Complete `--input-json` from the `boss schema` catalog |
 | `WORKFLOW_TIMEOUT` | The workflow exceeded its explicit timeout | Retain `run_id`, adjust timeout, and run `boss wizard --resume <run_id>` |
 | `WORKFLOW_PLAN_MISMATCH` | An existing `run_id` is bound to a different plan | Resume with the original plan or omit `run_id` to create a new run |
-| `WORKFLOW_BUSY` | The same `run_id` is already being executed by another invocation (another terminal, agent, or MCP call); this call ran no steps and left the checkpoint untouched | Check progress with `boss wizard --status <run_id>` and `--resume` once the current execution has ended; never resume the same `run_id` concurrently |
-| `WORKFLOW_NOT_FOUND` | The local workflow run does not exist or the `run_id` is wrong (`boss wizard --status` / `--stop` / `--resume`) | Run `boss wizard` to create a new run, or check the ID with `boss wizard --status <run_id>` |
-| `CRAWL_BUSY` | Another invocation is executing the same crawl run; this call sent no requests and left its checkpoint untouched | Use the returned `boss crawl status <run_id>` command for the same data directory, then resume once the current execution ends; never resume the same run concurrently; `status` / `results` / `stop` remain available |
-| `CRAWL_RUN_NOT_FOUND` | The local crawl run does not exist or the `run_id` is wrong (`boss crawl status` / `resume` / `results`, etc.) | Run `boss crawl start <query>` to create a new run, or check with `boss crawl status <run_id>` using the real ID |
-| `CONTACT_NOT_FOUND` | The contact is not in the chat list: the `security_id` may have rotated, or they are no longer listed | Run `boss chat` to inspect conversations; retry with the uid if you have it |
-| `SAVED_SEARCH_NOT_FOUND` | A local preset / watch does not exist: `boss search --preset` / `boss watch run` referenced a name that was never saved | List existing entries with `boss preset list` / `boss watch list`, then recreate with `boss preset add` / `boss watch add` if needed |
-| `SHORTLIST_ENTRY_NOT_FOUND` | The job is not in the shortlist (that `security_id` / `job_id` combination), so `boss shortlist annotate` has nothing to annotate | Add it first with `boss shortlist add <security_id> <job_id>`, or check existing entries with `boss shortlist list` |
-| `RESUME_FILE_INVALID` | A local resume file is corrupt or has wrong field types, so `boss resume show` / `edit` / `export` / `clone` / `diff` cannot read it (`boss resume list` reports these files in `hints.corrupt`) | Fix the matching `.json` under `resumes/` and retry, or run `boss resume delete <name>` and recreate it; the file exists only on this machine |
-| `JOB_NOT_FOUND` | Job removed or invalid | Re-search with `boss search <keywords>`, or check `boss recommend` |
+| `JOB_NOT_FOUND` | Job removed or invalid | Skip |
 | `ALREADY_GREETED` | Already messaged recruiter | Skip |
-| `CONFIRMATION_REQUIRED` | Operation target and content not approved | Preview with `hr greet --dry-run`, `hr accept-resume <friend_id> --message-id <mid> --dry-run`, or `hr location <friend_id> --dry-run`; set `--yes` only after explicit operator approval. Agents must not infer approval. |
+| `CONFIRMATION_REQUIRED` | Operation target and content not approved | Preview with `hr greet --dry-run` or `hr accept-resume <friend_id> --message-id <mid> --dry-run`; set `--yes` only after explicit operator approval. Agents must not infer approval. |
 | `RESUME_ACCEPT_RESULT_UNKNOWN` | Resume acceptance result is unconfirmed | Keep `accepted=null` and check the request on the official page; never automatically retry acceptance. |
-| `ACTION_UNCONFIRMED` | A write was dispatched, but its response was interrupted, was not JSON, or the page action could not be confirmed; it may already have taken effect (also raised by `--resume` when the executor was terminated before confirming the result) | Never resend automatically: candidates check greetings with `boss chat` and applications with `boss me --section deliver`; recruiters check `boss hr chatmsg <friend_id>`. The envelope carries `replay_safe: false` and `outcome_unknown: true`, and follow-up commands retain the current data directory. Recruiter page actions may also include page logs, WebSocket counts (`ws_evidence`, including `ws_send_without_text`: frames with no readable text) and history read-back evidence (`history_checked` / `history_matched_count` / `history_attempts` / `history_new_count` / `history_self_count` / `history_recipient_count`). |
+| `ACTION_UNCONFIRMED` | A recruiter contact-exchange or resume-request page action ran, but sending was not confirmed | The action may already have taken effect; check `boss hr chatmsg <friend_id>` before doing anything and never retry blindly. `error.details` contains the page log and WebSocket counts. |
 | `EXCHANGE_NOT_AVAILABLE` | The phone/WeChat exchange button is still locked (you have not sent a message in this conversation yet); nothing was sent | Reply to the candidate first (`boss hr reply <friend_id> <message>` or `boss hr request-resume <friend_id>`), then retry the exchange. `error.details` lists the disabled signals that were hit. |
 | `GREET_RESULT_UNKNOWN` | Send reserved, outcome unconfirmed | Check `boss hr chat --job-id <id>`; never automatically resend. Keep the local reservation and use the official page if needed. |
-| `LOCATION_ALREADY_SENT` | A work-location card was already sent in this conversation, and the local record blocks a duplicate | Check the card with `boss hr chatmsg <friend_id>`; do not delete the local record to resend |
-| `LOCATION_RESULT_UNKNOWN` | Work-location send outcome is unconfirmed | Keep the local reservation and check `boss hr chatmsg <friend_id>` for the card; never resend automatically |
-| `LOCAL_STATE_WRITE_FAILED` | The platform action completed but local state could not be saved | Check the official page for the actual result first; never automatically resend, and confirm disk space and cache-directory permissions before continuing |
-| `LOCAL_IO_ERROR` | A local file could not be read or written (export path, `config.json`, cache) | Do not retry automatically: make sure the target path is a writable directory (not an existing file of the same name) with enough disk space, then run the command again |
-| `MODEL_REGISTRY_INVALID` | The local model registry `models/registry.json` is unreadable (interrupted write, broken manual edit) | Fix or delete the file and retry; deleting it only drops the registry entries — the model files stay on disk, and re-running `boss ai local import` rebuilds them |
-| `AUTOMATION_STATE_INVALID` | The recruiter automation state `automation/state.json` is unreadable, so `boss agent run` / `stats` cannot continue (a broken `stop.json` is treated as an open circuit breaker) | Fix or delete the file and retry; deleting it loses automation deduplication and progress history, so back it up first |
-| `SAVED_SEARCH_INVALID` | A local preset / watch has unreadable params (`saved_searches.params` is not a JSON object), so `boss search --preset` / `boss watch run` cannot continue | Run `boss preset remove <name>` (or `boss watch remove`) and add it again; the params live only in the local cache, so deleting them does not touch platform data |
-| `CACHE_RECORD_INVALID` | A local crawl / workflow record is unreadable (`crawl_runs`, `crawl_jobs`, `workflow_runs` or `workflow_steps` JSON columns cannot be parsed), so the checkpoint cannot be resumed | Re-create the task (`boss crawl start` for crawl, `boss wizard --input-json` for workflows); the record lives only in the local cache, already-exported files are left untouched, and the `boss wizard` task list skips broken records and names them |
-| `CACHE_DATABASE_INVALID` | The local cache database `cache/boss_agent.db` is corrupted or occupied by another file (`file is not a database`), so nearly every command that reads or writes local state fails | Back up the file, delete it and retry; a fresh empty database is created automatically. The shortlist, presets, watch history and task checkpoints in it are lost, while platform data is untouched. Retryable failures such as a concurrent lock never report this code |
-| `ALREADY_APPLIED` | Already applied | Skip; review applications with `boss me --section deliver`, or follow up with `boss chat` |
+| `ALREADY_APPLIED` | Already applied | Skip |
 | `GREET_LIMIT` | Daily greet quota hit | Pause until tomorrow |
 | `NETWORK_ERROR` | Connection failed | Retry with backoff |
-| `UNKNOWN` | The platform returned an unrecognized error (it does not match expired session, rate limit or risk control), and a write response cannot prove the action did not happen | Do not retry automatically: check the official page for the actual result, run `boss doctor` to verify session and network, then run the command once more; if it still fails, open an issue with the command and `error.message`. The envelope always carries `replay_safe: false`; the browser channel reports a non-JSON write response as `ACTION_UNCONFIRMED` |
-| `INTERNAL_ERROR` | CLI bug or unexpected platform data shape | Do not retry; upgrade, and if it persists open an issue with the command and error.message |
 | `INVALID_PARAM` | Bad argument | Fix parameter |
 | `AI_NOT_CONFIGURED` | AI service not set up | `boss ai config` |
 | `AI_API_ERROR` | AI provider call failed | Retry / check key |
 | `AI_PARSE_ERROR` | AI response not JSON | Retry |
-| `PLATFORM_NOT_SUPPORTED` | The current platform does not support this role or subcommand | Switch to a supported platform (e.g. `boss --platform zhipin hr ...`) |
-| `BROWSER_KERNEL_MISSING` | patchright browser kernel missing or mismatched (including non-login commands that launch a browser: `search` / `detail` / `greet` / `chat` / `me` / `wizard`, and `resume export --format pdf`) | `<interpreter running boss> -m patchright install chromium` (the envelope's `recovery_action` gives the full command); if the headless shell is missing, run `-m patchright install chromium-headless-shell` with the same interpreter. This is a deterministic failure; retrying will not help |
+| `BROWSER_KERNEL_MISSING` | patchright browser kernel missing or mismatched | `patchright install chromium`; if the headless shell is missing, run `patchright install chromium-headless-shell` |
 
 ## Windows smoke checklist
 

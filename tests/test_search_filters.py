@@ -1,11 +1,9 @@
 """Tests for search_filters module — list-page prefiltering and pipeline."""
 import pytest
 
-from boss_agent_cli.api import endpoints
 from boss_agent_cli.search_filters import (
 	SearchFilterCriteria,
 	SearchUrlParseError,
-	city_constraint,
 	compute_match_score,
 	parse_salary_range,
 	parse_boss_search_url,
@@ -67,37 +65,9 @@ class TestSearchUrlParsing:
 
 	def test_resolve_search_code_params_supports_multiselect(self):
 		params = resolve_search_code_params(experience="应届,3-5年", education="本科,硕士", job_type="全职,实习")
-		assert params["experience"] == "102,105"
+		assert params["experience"] == "108,104"
 		assert params["degree"] == "203,204"
 		assert params["jobType"] == "1901,1902"
-
-	def test_resolve_search_code_params_salary_and_low_degrees(self):
-		params = resolve_search_code_params(salary="3K以下,5-10K", education="初中及以下,中专/中技,高中")
-		assert params["salary"] == "402,404"
-		assert params["degree"] == "209,208,206"
-
-	def test_resolve_search_code_params_dedupes_labels_sharing_a_code(self):
-		"""兼容标签 10-15K 与 10-20K 同码，多选时只发一次，顺序保持首次出现。"""
-		params = resolve_search_code_params(salary="10-15K,10-20K,20-50K,405")
-		assert params["salary"] == "405,406"
-
-	def test_unknown_industry_label_suggests_close_matches(self):
-		with pytest.raises(ValueError) as exc:
-			resolve_search_code_params(industry="汽车")
-		message = str(exc.value)
-		assert message.startswith("未知行业类型: 汽车，相近的可选值: ")
-		assert "新能源汽车" in message
-
-	def test_unknown_label_without_close_match_lists_choices(self):
-		"""没有相近值时不能只回「未知」，大表给出总数和样例，小表可直接全列。"""
-		with pytest.raises(ValueError, match=r"^未知行业类型: 区块链，共 97 个可选值，例如: "):
-			resolve_search_code_params(industry="区块链")
-		with pytest.raises(ValueError, match=r"^未知公司规模: 巨型企业，可选值: "):
-			resolve_search_code_params(scale="巨型企业")
-
-	def test_salary_typo_suggests_canonical_label(self):
-		with pytest.raises(ValueError, match="相近的可选值: 5-10K"):
-			resolve_search_code_params(salary="5-10k")
 
 
 # ── Experience threshold ────────────────────────────────────────────
@@ -299,32 +269,3 @@ class TestComputeMatchScore:
 
 		assert two > one
 		assert compute_match_score(item, ["双休(标签)", "五险一金(标签)"], criteria) == two
-
-
-# ── 全国：不限城市 ──────────────────────────────────────────
-
-
-def test_nationwide_city_resolves_to_platform_code():
-	assert endpoints.CITY_CODES["全国"] == "100010000"
-	for city, code in (("嘉兴", "101210300"), ("徐州", "101190800"), ("香港", "101320100")):
-		assert endpoints.CITY_CODES[city] == code
-
-
-def test_nationwide_city_is_no_local_city_constraint():
-	assert city_constraint("全国") is None
-	assert city_constraint("杭州") == "杭州"
-	assert city_constraint(None) is None
-
-
-def test_nationwide_search_does_not_prefilter_every_job_by_city():
-	"""全国不是具体城市名：本地预筛不能因为 cityName 不含「全国」就把职位全排除。"""
-	criteria = SearchFilterCriteria(query="后端", city="全国")
-	ok, reasons = prefilter_job({"jobName": "后端", "cityName": "杭州"}, criteria)
-	assert ok, reasons
-
-
-def test_specific_city_prefilter_still_rejects_other_cities():
-	criteria = SearchFilterCriteria(query="后端", city="杭州")
-	ok, reasons = prefilter_job({"jobName": "后端", "cityName": "上海"}, criteria)
-	assert not ok
-	assert reasons == ["城市不匹配: 上海 != 杭州"]

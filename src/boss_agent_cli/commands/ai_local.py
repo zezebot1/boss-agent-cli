@@ -17,37 +17,20 @@ from boss_agent_cli.ai.local_models import (
 	read_imported_models,
 	recommended_model_rows,
 )
-from boss_agent_cli.ai.service import AIService, AIServiceError, recovery_action_for
+from boss_agent_cli.ai.service import AIService, AIServiceError
 from rich.table import Table
 
 from boss_agent_cli import display
-from boss_agent_cli.display import (
-	boss_command_for_ctx,
-	error_contract_for_code,
-	handle_error_output,
-	handle_output,
-	render_action_result,
-	render_next_steps,
-	shell_argument,
-)
+from boss_agent_cli.display import handle_error_output, handle_output, render_action_result, render_next_steps
 
 
-def _hint_command(ctx: click.Context, command: str) -> str:
-	"""本地模型命令的后继与恢复提示沿用 AI 配置和模型文件所在的数据目录。"""
-	return boss_command_for_ctx(ctx, command, include_data_dir=True)
-
-
-def _render_local_status(ctx: click.Context, data: dict[str, Any]) -> None:
+def _render_local_status(data: dict[str, Any]) -> None:
 	"""本地模型配置 + 推荐清单（TTY 路径）。"""
 	state = "[green]已配置[/green]" if data.get("configured") else "[yellow]未配置[/yellow]"
 	display.console.print(f"本地模型：{state}")
-	# provider / model / base_url 是自由文本配置（`ai local configure --model` 不限
-	# 格式，配置文件也可手改）：不经 escape 直接拼进 Rich，含 `[/bold]` 的值会抛
-	# MarkupError 让整条 TTY 输出崩掉，含可解析标签的值会被吞成样式（Issue #964）。
-	esc = display.escape_markup
 	if data.get("configured"):
-		display.console.print(f"  runtime: {esc(data.get('provider') or '-')}    model: {esc(data.get('model') or '-')}")
-		display.console.print(f"  base_url: {esc(data.get('base_url') or '-')}")
+		display.console.print(f"  runtime: {data.get('provider') or '-'}    model: {data.get('model') or '-'}")
+		display.console.print(f"  base_url: {data.get('base_url') or '-'}")
 
 	rows = data.get("recommended_models") or []
 	if rows:
@@ -59,10 +42,10 @@ def _render_local_status(ctx: click.Context, data: dict[str, Any]) -> None:
 		for row in rows:
 			mark = " ★" if row.get("recommended") else ""
 			table.add_row(
-				f"{esc(row.get('name', '-'))}{mark}",
-				esc(row.get("runtime", "-")),
-				f"{esc(row.get('min_memory_gb', '-'))} GB",
-				esc(row.get("description", "")),
+				f"{row.get('name', '-')}{mark}",
+				str(row.get("runtime", "-")),
+				f"{row.get('min_memory_gb', '-')} GB",
+				str(row.get("description", "")),
 			)
 		display.console.print(table)
 
@@ -71,9 +54,9 @@ def _render_local_status(ctx: click.Context, data: dict[str, Any]) -> None:
 		display.console.print(f"  已导入 {len(imported)} 个本地模型")
 
 	render_next_steps(
-		[_hint_command(ctx, "ai local smoke")]
+		["boss ai local smoke"]
 		if data.get("configured")
-		else [_hint_command(ctx, "ai local configure --runtime ollama --model qwen3:14b")]
+		else ["boss ai local configure --runtime ollama --model qwen3:14b"]
 	)
 
 
@@ -100,15 +83,15 @@ def local_status_cmd(ctx: click.Context) -> None:
 			"recommended_models": recommended_model_rows(),
 			"imported_models": [asdict(item) for item in read_imported_models(ctx.obj["data_dir"])],
 		},
-		render=lambda d: _render_local_status(ctx, d),
-		hints={"next_actions": [_hint_command(ctx, "ai local configure --runtime ollama --model qwen3:14b")]},
+		render=_render_local_status,
+		hints={"next_actions": ["boss ai local configure --runtime ollama --model qwen3:14b"]},
 	)
 
 
 @ai_local_group.command("configure")
-@click.option("--runtime", required=True, type=click.Choice(["ollama", "vllm"]), help="本地运行时")
-@click.option("--model", required=True, help="本地模型名称")
-@click.option("--base-url", default=None, help="本地服务基础地址；省略时按 runtime 取默认值")
+@click.option("--runtime", required=True, type=click.Choice(["ollama", "vllm"]))
+@click.option("--model", required=True)
+@click.option("--base-url", default=None)
 @click.pass_context
 def local_configure_cmd(ctx: click.Context, runtime: str, model: str, base_url: str | None) -> None:
 	"""配置本地 OpenAI-compatible 模型服务。"""
@@ -126,21 +109,15 @@ def local_configure_cmd(ctx: click.Context, runtime: str, model: str, base_url: 
 		"ai.local.configure",
 		{"runtime": runtime, "model": model, "base_url": store.get_base_url()},
 		render=lambda d: render_action_result(
-			d, title="ai local configure", next_steps=[
-				_hint_command(ctx, "ai local status"),
-				_hint_command(ctx, "ai local smoke"),
-			]
+			d, title="ai local configure", next_steps=["boss ai local status", "boss ai local smoke"]
 		),
-		hints={"next_actions": [
-			_hint_command(ctx, "ai local smoke"),
-			_hint_command(ctx, "ai local status"),
-		]},
+		hints={"next_actions": ["boss ai local smoke", "boss ai local status"]},
 	)
 
 
 @ai_local_group.command("pull")
-@click.option("--model", required=True, help="要下载的模型名称")
-@click.option("--confirm-download", is_flag=True, default=False, help="确认下载并接受模型体积与来源")
+@click.option("--model", required=True)
+@click.option("--confirm-download", is_flag=True, default=False)
 @click.pass_context
 def local_pull_cmd(ctx: click.Context, model: str, confirm_download: bool) -> None:
 	"""通过 Ollama 下载模型权重。"""
@@ -151,34 +128,20 @@ def local_pull_cmd(ctx: click.Context, model: str, confirm_download: bool) -> No
 			code="CONFIRM_DOWNLOAD_REQUIRED",
 			message="下载模型权重需要显式传 --confirm-download",
 			recoverable=True,
-			recovery_action=_hint_command(ctx, f"ai local pull --model {shell_argument(model)} --confirm-download"),
+			recovery_action=f"boss ai local pull --model {model} --confirm-download",
 		)
-	try:
-		result = subprocess.run(
-			["ollama", "pull", model],
-			check=False,
-			capture_output=True,
-			text=True,
-		)
-	except OSError as exc:
-		# 没装 ollama 时 subprocess 抛 FileNotFoundError，顶层 OSError 网兜会把它归成
-		# LOCAL_IO_ERROR（不可恢复、指引去检查目标路径是否可写），而这里已有专门的拉取
-		# 失败契约：按 LOCAL_MODEL_PULL_FAILED 返回，指引装好 Ollama 后再试。
-		handle_error_output(
-			ctx,
-			"ai.local.pull",
-			code="LOCAL_MODEL_PULL_FAILED",
-			message=f"无法启动 ollama：{exc}",
-			recoverable=True,
-			recovery_action="确认已安装 Ollama 且 ollama 在 PATH 中，然后重新执行",
-		)
-		return
+	result = subprocess.run(
+		["ollama", "pull", model],
+		check=False,
+		capture_output=True,
+		text=True,
+	)
 	if result.returncode != 0:
 		handle_error_output(
 			ctx,
 			"ai.local.pull",
 			code="LOCAL_MODEL_PULL_FAILED",
-			message=result.stderr.strip() or "ollama pull 未返回错误输出，退出码非零",
+			message=result.stderr.strip() or "ollama pull failed",
 			recoverable=True,
 			recovery_action="确认 Ollama 已安装并可访问网络后重试",
 		)
@@ -186,52 +149,35 @@ def local_pull_cmd(ctx: click.Context, model: str, confirm_download: bool) -> No
 		ctx,
 		"ai.local.pull",
 		{"status": "installed", "model": model},
-		render=lambda d: render_action_result(
-			d, title="ai local pull", next_steps=[_hint_command(ctx, "ai local smoke")]
-		),
-		hints={"next_actions": [_hint_command(ctx, "ai local smoke")]},
+		render=lambda d: render_action_result(d, title="ai local pull", next_steps=["boss ai local smoke"]),
 	)
 
 
 @ai_local_group.command("import")
-@click.option("--path", "source_path", required=True, type=click.Path(exists=True, path_type=Path), help="本地模型文件或目录路径")
-@click.option("--model", required=True, help="导入后登记的模型名称")
+@click.option("--path", "source_path", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--model", required=True)
 @click.pass_context
 def local_import_cmd(ctx: click.Context, source_path: Path, model: str) -> None:
 	"""导入离线模型文件或目录到本地数据目录。"""
 	try:
 		imported = import_local_model(ctx.obj["data_dir"], source_path, model)
 	except LocalModelManifestError as exc:
-		recoverable, recovery_action = error_contract_for_code(exc.code)
 		handle_error_output(
 			ctx,
 			"ai.local.import",
 			code=exc.code,
 			message=exc.message,
-			recoverable=recoverable,
-			recovery_action=recovery_action,
+			recoverable=True,
+			recovery_action="检查模型路径和 manifest 后重试",
 		)
-	# 只登记模型文件，不改 AI 配置：这里原先会写 ai_provider=custom / ai_base_url=None /
-	# ai_model=<导入名> 并覆盖 api_key，把已经配好的 ollama / vLLM 端点清空，下一条
-	# AI 命令就直接报「AI 服务未配置」。导入也不该切换当前模型——把一个正在服务的
-	# 模型名换成只有权重文件、没有服务在跑的导入名，请求同样必然失败。
+	store = AIConfigStore(ctx.obj["data_dir"])
+	store.save_config(ai_provider="custom", ai_model=model, ai_base_url=None)
+	store.save_api_key("local")
 	handle_output(
 		ctx,
 		"ai.local.import",
 		asdict(imported),
-		render=lambda d: render_action_result(
-			d, title="ai local import",
-			next_steps=[_hint_command(ctx, f"ai local configure --runtime vllm --model {shell_argument(model)}")],
-		),
-		hints={
-			"next_actions": [
-				_hint_command(ctx, f"ai local configure --runtime vllm --model {shell_argument(model)}"),
-				_hint_command(ctx, "ai local status"),
-			],
-			"operator_actions": [
-				"用 vLLM / llama.cpp 等 OpenAI 兼容服务加载该模型后，执行上面的 configure 命令把端点写入配置",
-			],
-		},
+		render=lambda d: render_action_result(d, title="ai local import", next_steps=["boss ai local status"]),
 	)
 
 
@@ -245,33 +191,21 @@ def local_smoke_cmd(ctx: click.Context) -> None:
 	base_url = store.get_base_url()
 	model = config.get("ai_model")
 	if not api_key or not base_url or not model:
-		provider = store.unresolved_provider()
-		message = (
-			"本地 AI 服务未配置"
-			if provider is None
-			else f"本地 AI 服务没有可用端点：provider {provider!r} 未登记或未设置 --base-url"
-		)
 		handle_error_output(
 			ctx,
 			"ai.local.smoke",
 			code="AI_NOT_CONFIGURED",
-			message=message,
+			message="本地 AI 服务未配置",
 			recoverable=True,
-			recovery_action=(
-				_hint_command(ctx, "ai local configure --runtime ollama --model qwen3:14b")
-				+ "，或 "
-				+ _hint_command(ctx, "ai config --provider <provider> --base-url <url>")
-			),
+			recovery_action="boss ai local configure --runtime ollama --model qwen3:14b",
 		)
 		return
-	# 输出上限用配置值而不是写死的小数：思考模型在几十个 token 内写不完思考，
-	# 健康检查应和自动化用同一个上限，「调大 max_tokens」的建议才对它生效
 	service = AIService(
 		base_url=base_url,
 		api_key=api_key,
 		model=str(model),
 		temperature=0.1,
-		max_tokens=int(config.get("ai_max_tokens") or 512),
+		max_tokens=32,
 	)
 	try:
 		reply = service.chat([
@@ -285,19 +219,11 @@ def local_smoke_cmd(ctx: click.Context) -> None:
 			code="AI_API_ERROR",
 			message=f"本地 AI 服务调用失败: {exc}",
 			recoverable=True,
-			recovery_action=recovery_action_for(
-				exc,
-				"确认本地模型服务已启动后重试",
-				config_command=_hint_command(ctx, "ai config"),
-			),
+			recovery_action="确认本地模型服务已启动后重试",
 		)
-		return
 	handle_output(
 		ctx,
 		"ai.local.smoke",
 		{"status": "ok", "model": str(model), "reply": reply[:200]},
-		render=lambda d: render_action_result(
-			d, title="ai local smoke", next_steps=[_hint_command(ctx, "ai analyze-jd <security_id>")]
-		),
-		hints={"next_actions": [_hint_command(ctx, "ai analyze-jd <security_id>")]},
+		render=lambda d: render_action_result(d, title="ai local smoke", next_steps=["boss ai analyze-jd <security_id>"]),
 	)

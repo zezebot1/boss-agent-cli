@@ -146,7 +146,7 @@ def require_supported_platform(role: str, platform: str) -> None:
 	platforms = list(role_spec.get("platforms") or [])
 	if platform not in platforms:
 		raise WorkflowInputError(
-			f"角色 {role} 不支持平台 {platform!r}，可选: {', '.join(platforms) or '-'}"
+			f"角色 {role} 不支持平台 {platform!r}，supported: {', '.join(platforms) or '-'}"
 		)
 
 
@@ -154,12 +154,7 @@ def build_plan(wizard_input: WizardInput) -> WorkflowPlan:
 	role_goals = GOALS[wizard_input.role]
 	goal = role_goals.get(wizard_input.goal)
 	if goal is None:
-		# 与 require_supported_platform 同口径：报错要带可选值，否则 Agent 只知道
-		# 自己写错了，还得再调一次 boss schema 才能凑出合法输入。
-		available = ", ".join(sorted(role_goals)) or "-"
-		raise WorkflowInputError(
-			f"角色 {wizard_input.role} 不支持 goal {wizard_input.goal!r}，可选: {available}"
-		)
+		raise WorkflowInputError(f"角色 {wizard_input.role} 不支持 goal {wizard_input.goal!r}")
 	require_supported_platform(wizard_input.role, wizard_input.platform)
 	missing = [
 		name
@@ -171,17 +166,7 @@ def build_plan(wizard_input: WizardInput) -> WorkflowPlan:
 	steps = wizard_input.requested_steps or goal.steps
 	unknown_steps = [step for step in steps if step not in goal.steps]
 	if unknown_steps:
-		raise WorkflowInputError(
-			f"requested_steps 不属于 goal {goal.name!r}: {', '.join(unknown_steps)}"
-			f"；可选: {', '.join(goal.steps)}"
-		)
-	duplicates = sorted({step for step in steps if steps.count(step) > 1})
-	if duplicates:
-		# 步骤表主键是 (run_id, step_name)：带重复项写库会抛 sqlite3.IntegrityError，
-		# 这里必须在建 plan 时拒绝，否则命令没有错误信封（Issue #879）。
-		raise WorkflowInputError(
-			f"requested_steps 不能重复: {', '.join(duplicates)}；每个步骤只写一次，执行顺序由 goal 决定"
-		)
+		raise WorkflowInputError(f"requested_steps 不属于 goal {goal.name!r}: {', '.join(unknown_steps)}")
 	return WorkflowPlan(
 		role=wizard_input.role,
 		platform=wizard_input.platform,

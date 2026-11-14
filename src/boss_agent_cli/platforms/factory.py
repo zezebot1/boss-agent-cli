@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from boss_agent_cli.config import DEFAULT_REQUEST_DELAY
 from boss_agent_cli.api.browser_source import BrowserSourceUnsupported, resolve_policy
 from boss_agent_cli.api.client import BossClient
 from boss_agent_cli.api.recruiter_client import BossRecruiterClient
@@ -47,7 +46,7 @@ def build_platform_instance(
 	name: str,
 	auth: "AuthManager",
 	*,
-	delay: tuple[float, float] = DEFAULT_REQUEST_DELAY,
+	delay: tuple[float, float] = (1.5, 3.0),
 	cdp_url: str | None = None,
 	browser_source: str | None = None,
 ) -> Platform:
@@ -61,7 +60,7 @@ def build_recruiter_platform_instance(
 	name: str,
 	auth: "AuthManager",
 	*,
-	delay: tuple[float, float] = DEFAULT_REQUEST_DELAY,
+	delay: tuple[float, float] = (1.5, 3.0),
 	cdp_url: str | None = None,
 	browser_source: str | None = None,
 ) -> RecruiterPlatform:

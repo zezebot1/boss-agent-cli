@@ -8,10 +8,6 @@ from typing import Any, cast
 from patchright.sync_api import sync_playwright
 
 from boss_agent_cli.api.browser_urls import DEFAULT_CDP_URL, is_zhipin_url
-from boss_agent_cli.api.proxy import WEBRTC_LEAK_GUARD_ARGS, resolve_proxy
-from boss_agent_cli.auth.identity import account_fingerprint
-from boss_agent_cli.auth.login_diagnostics import login_diagnostic
-from boss_agent_cli.auth.page_identity import PageIdentityCapture
 
 LOGIN_PAGE_URL = "https://www.zhipin.com/web/user/"
 HOME_URL = "https://www.zhipin.com/"
@@ -22,7 +18,6 @@ _CDP_PROBE_TIMEOUT = 3  # CDP 探测 HTTP 超时（秒）
 _NAV_TIMEOUT_MS = 15000  # 页面导航超时（毫秒）
 _NETWORKIDLE_GRACE_MS = 3000  # 首页进入 networkidle 的额外宽限（毫秒）
 _POST_LOGIN_WAIT = 3  # 登录成功后等待 cookie 传播（秒）
-_PAGE_IDENTITY_WAIT_MS = 5000  # 抓 token/zp_token 时等待页面自己发一条业务请求（毫秒）
 _STOKEN_GENERATION_WAIT = 2  # stoken 生成等待（秒）
 _HOME_NAV_RETRIES = 2  # 首页导航超时后的重试次数（含首次）
 
@@ -227,7 +222,9 @@ def _account_fingerprint(cookie_value: str) -> str:
 	但同一账号的 cookie 值稳定、不同账号不同，故用哈希前缀作为「账号指纹」——
 	既能让用户在多 context 下区分选中的是不是目标账号，又不泄露 cookie 本身。
 	"""
-	return account_fingerprint(cookie_value, length=8)
+	import hashlib
+
+	return hashlib.sha256(cookie_value.encode("utf-8")).hexdigest()[:8]
 
 
 def _browser_diag(message: str) -> None:
@@ -315,8 +312,6 @@ def login_via_cdp(
 			用户没有任何重登入口（Issue #424）。只清目标平台域、只清当前 context，
 			其他站点与其他 context 不动。
 	"""
-	from boss_agent_cli.api.client import PlatformRiskError
-
 	config = _get_platform_config(platform)
 	login_page_url = config["login_page_url"]
 	home_url = config["home_url"]
@@ -333,11 +328,7 @@ def login_via_cdp(
 	try:
 		for existing_context in all_contexts:
 			for existing_page in existing_context.pages:
-				try:
-					_raise_if_security_page(existing_page, is_cdp=True)
-				except PlatformRiskError as error:
-					error.details["login_diagnostic"] = login_diagnostic(existing_page, stage="open_login")
-					raise
+				_raise_if_security_page(existing_page, is_cdp=True)
 	except Exception:
 		with suppress(Exception):
 			pw.stop()
@@ -362,7 +353,6 @@ def login_via_cdp(
 	if page is None:
 		page = ctx.new_page()
 
-	stage = "open_login"
 	try:
 		_raise_if_security_page(page, is_cdp=True)
 		if already_logged_in:
@@ -394,7 +384,6 @@ def login_via_cdp(
 
 			print(f"[boss] 请在 Chrome 中扫码登录，等待中...（超时 {timeout}s）", file=sys.stderr)
 
-			stage = "wait_for_scan"
 			for i in range(timeout):
 				time.sleep(1)
 				_raise_if_security_page(page, is_cdp=True)
@@ -402,7 +391,7 @@ def login_via_cdp(
 				# 而不是被吞成 [] 继续空转到超时，误报成「扫码超时」（与最终读取同一规则）。
 				cookies = [c for c in ctx.cookies() if _is_cookie_domain(c.get("domain", ""), cookie_domain)]
 				if any(c.get("name") == success_cookie and c.get("value") for c in cookies):
-					print("[boss] 已识别到扫码确认，正在校验并保存凭证…", file=sys.stderr)
+					print("[boss] 检测到登录成功！", file=sys.stderr)
 					break
 				if i > 0 and i % 15 == 0:
 					print(f"[boss] 等待中... {i}s", file=sys.stderr)
@@ -415,28 +404,19 @@ def login_via_cdp(
 		# page_ready 是「可对 page evaluate」的统一就绪门禁，覆盖所有复用既有页签
 		# （not created_page）的情况——无论预先登录还是扫码后登录。新建页签的就绪由
 		# _warm_home_for_runtime 的返回值 home_loaded 表达。
-		stage = "read_user_agent"
 		ua = ""
 		page_ready = False
-		# 页面自己给每条业务 XHR 加的 token/zp_token 只能在导航前挂监听才抓得到：
-		# 首次 SPA 启动的那批请求就是携带者。
-		identity_capture = PageIdentityCapture(page)
 		if not already_logged_in:
 			# 未登录：登录页 goto 用 wait_until="commit"，不保证执行上下文就绪；扫码轮询
 			# 在 cookie 出现时即 break，页面可能仍在导航。采 UA 前做有界就绪确认，卡住则
 			# 容忍 UA 为空、不挂起。
 			page_ready = _ensure_page_evaluable(page)
 			ua = _safe_user_agent(page) if page_ready else ""
-			# evaluate 之后页面可能已跳到安全页：命中即停止，不再自动预热首页（Issue #863）。
-			_raise_if_security_page(page, is_cdp=True)
-			stage = "warm_home"
 			home_loaded = _warm_home_for_runtime(page, home_url, stage="登录后回到首页", is_cdp=True)
 		elif created_page:
 			# 复用登录态但无既有平台页签：新建页签回平台 home
-			stage = "warm_home"
 			home_loaded = _warm_home_for_runtime(page, home_url, stage="复用登录态回首页", is_cdp=True)
 			page_ready = home_loaded
-			stage = "read_user_agent"
 			ua = _safe_user_agent(page) if home_loaded else ""
 		else:
 			# 复用既有平台页签（已预先登录）：不导航，避免打断用户页面；有界确认就绪后采 UA。
@@ -448,7 +428,6 @@ def login_via_cdp(
 		if already_logged_in:
 			# 复用只证明 cookie 存在，不证明服务端仍认：wt2 已失效但仍在 jar 里时，
 			# 不探测就会把死凭证当「登录成功」落盘，之后每条命令都 AUTH_REQUIRED（Issue #424）。
-			stage = "probe_session"
 			probe_ready = home_loaded if created_page else page_ready
 			status = _probe_reused_session(page, platform=platform) if probe_ready else "unverified"
 			if status == "stale":
@@ -466,7 +445,6 @@ def login_via_cdp(
 		# 不能用吞异常的 _matching_cookies：ctx.cookies() 抛错（如 CDP target closed）若返回
 		# []，会被当作 cookies={} 的「成功」结果落盘（AuthManager.login 不校验主 cookie）。
 		# 故直接 ctx.cookies() 让异常传播，并读完后校验主 cookie 存在，否则 raise。
-		stage = "read_credentials"
 		all_cookies = {
 			c["name"]: c["value"] for c in ctx.cookies() if _is_cookie_domain(c.get("domain", ""), cookie_domain)
 		}
@@ -483,56 +461,13 @@ def login_via_cdp(
 					stoken = _extract_stoken(page)
 		else:
 			stoken = ""
-		# 复用既有页签时页面已启动完，只能有界等它自己发一条业务请求。
-		identity_capture.wait_for_identity(_PAGE_IDENTITY_WAIT_MS)
-		page_identity = identity_capture.result()
-		if platform == "zhipin" and not page_identity and not created_page:
-			# 新建页签的路径已经在 _warm_home_for_runtime 里导航过，监听器抓到了启动请求；
-			# 复用已有页签时页面早已启动完且不再发请求，才需要临时页签补采一次。
-			page_identity = _capture_identity_from_probe_page(ctx, home_url, existing=page)
-		return {"cookies": all_cookies, "stoken": stoken, "user_agent": ua, **page_identity}
-	except PlatformRiskError as error:
-		if "login_diagnostic" not in error.details:
-			error.details["login_diagnostic"] = login_diagnostic(page, stage=stage)
-		raise
+		return {"cookies": all_cookies, "stoken": stoken, "user_agent": ua}
 	finally:
-		with suppress(Exception):
-			identity_capture.close()
 		if created_page:
 			with suppress(Exception):
 				page.close()
 		with suppress(Exception):
 			pw.stop()
-
-
-def _capture_identity_from_probe_page(ctx: Any, home_url: str, *, existing: Any = None) -> dict[str, str]:
-	"""Load a throwaway tab in the same context and harvest page identity headers.
-
-	The page's own bootstrap XHRs are the only reliable source for ``token`` and
-	``zp_token``; the CLI cannot recompute them. Returns an empty mapping on any
-	failure so a login never fails because identity capture did.
-	"""
-	probe = None
-	capture = None
-	try:
-		probe = ctx.new_page()
-		if probe is existing:
-			# 绝不把用户的页签当临时页签关闭。
-			return {}
-		capture = PageIdentityCapture(probe)
-		# 首页常年在 domcontentloaded 上超时；commit 已足够，随后靠 wait_for_identity 驱动事件循环。
-		probe.goto(home_url, wait_until="commit", timeout=_NAV_TIMEOUT_MS)
-		return capture.wait_for_identity(_PAGE_IDENTITY_WAIT_MS)
-	except Exception as exc:
-		_logger.info("未能采集页面身份头（token/zp_token）：%s", exc)
-		return {}
-	finally:
-		if capture is not None:
-			with suppress(Exception):
-				capture.close()
-		if probe is not None:
-			with suppress(Exception):
-				probe.close()
 
 
 def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[str, Any]:
@@ -548,13 +483,7 @@ def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[s
 	cookie_domain = config["cookie_domain"]
 	success_cookie = config["success_cookie"]
 	with sync_playwright() as p:
-		browser = p.chromium.launch(
-				headless=False,
-				proxy=resolve_proxy(),
-				args=list(WEBRTC_LEAK_GUARD_ARGS),
-			)
-		stage = "open_login"
-		page: Any = None
+		browser = p.chromium.launch(headless=False)
 		try:
 			context = browser.new_context(
 				viewport={"width": 1280, "height": 800},
@@ -605,7 +534,6 @@ def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[s
 					if response.status == 403:
 						raise AccountRiskError("浏览器登录遇到平台访问限制，已停止", details={"platform_code": None})
 				except PlatformRiskError as exc:
-					exc.details["login_diagnostic"] = login_diagnostic(page, stage=stage, response=response)
 					response_risk = exc
 					return
 				if (
@@ -617,7 +545,6 @@ def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[s
 
 			page.on("response", _on_response)
 
-			stage = "wait_for_scan"
 			deadline = time.time() + timeout
 			while time.time() < deadline and not login_detected:
 				if response_risk is not None:
@@ -642,30 +569,20 @@ def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[s
 				raise TimeoutError(f"扫码登录超时（{timeout}秒）")
 
 			_raise_if_security_page(page)
-			print("[boss] 已识别到扫码确认，正在校验并保存凭证…", file=sys.stderr)
-			stage = "post_scan_wait"
+			print("检测到登录成功，正在提取凭证...", file=sys.stderr)
 			time.sleep(_POST_LOGIN_WAIT)
 			if response_risk is not None:
 				raise response_risk
 			_raise_if_security_page(page)
 
 			# UA 在已加载的登录页上记录（此时 evaluate 安全）；之后再预热首页
-			stage = "read_user_agent"
 			user_agent = _safe_user_agent(page)
 
-			# UA 采集会让页面继续处理排队中的响应，监听器可能刚刚锁存安全页风险；
-			# 命中风控后不能再自动发出首页导航（Issue #863）。
-			if response_risk is not None:
-				raise response_risk
-			_raise_if_security_page(page)
-
 			# 跳转主站提取完整 cookies 和 stoken
-			stage = "warm_home"
 			home_loaded = _warm_home_for_runtime(page, home_url, stage="登录后回到首页")
 			if response_risk is not None:
 				raise response_risk
 
-			stage = "read_credentials"
 			cookies_list = context.cookies()
 			cookies = {
 				c["name"]: c["value"] for c in cookies_list if _is_cookie_domain(c.get("domain", ""), cookie_domain)
@@ -677,10 +594,6 @@ def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[s
 			else:
 				stoken = ""
 
-		except PlatformRiskError as error:
-			if "login_diagnostic" not in error.details:
-				error.details["login_diagnostic"] = login_diagnostic(page, stage=stage)
-			raise
 		finally:
 			with suppress(Exception):
 				browser.close()
@@ -731,11 +644,7 @@ def refresh_stoken_via_cdp(cdp_url: str | None = None) -> str:
 def refresh_stoken(cookies: dict[str, Any], user_agent: str) -> str:
 	"""通过 headless patchright 刷新 stoken（兜底方案）。"""
 	with sync_playwright() as p:
-		browser = p.chromium.launch(
-			headless=True,
-			proxy=resolve_proxy(),
-			args=list(WEBRTC_LEAK_GUARD_ARGS),
-		)
+		browser = p.chromium.launch(headless=True)
 		context = browser.new_context(user_agent=user_agent)
 		context.add_cookies(
 			[{"name": name, "value": value, "domain": ".zhipin.com", "path": "/"} for name, value in cookies.items()]

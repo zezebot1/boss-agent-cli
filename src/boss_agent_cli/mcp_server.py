@@ -9,12 +9,9 @@ import argparse
 import asyncio
 import json
 import math
-import os
 import signal
 import subprocess
-import sys
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from mcp.server import Server
@@ -77,9 +74,7 @@ SERVER_INSTRUCTIONS = (
 	" For hr_greet, preview with dry_run and obtain explicit operator approval for that candidate and message "
 	"before setting yes=true. Never infer approval or retry a confirmation failure with yes=true on your own. "
 	"An uncertain send result requires conversation verification, not another send. "
-	"After a post-send error, inspect error.details.sent and stop; a sent greeting must not be repeated. "
-	"For hr_location, preview with dry_run and obtain explicit operator approval before setting yes=true. "
-	"Do not resend a location card to the same friend, and do not call it while the automation stop switch is open."
+	"After a post-send error, inspect error.details.sent and stop; a sent greeting must not be repeated."
 )
 
 server = Server(
@@ -98,28 +93,6 @@ _BOSS_GLOBAL_ARGS: list[str] = []
 _CLI_TIMEOUT_SECONDS = 120.0
 _CHECKPOINT_GRACE_SECONDS = 5.0
 _TERMINATE_GRACE_SECONDS = 1.0
-
-
-def _default_boss_bin(*, executable: str | None = None, windows: bool | None = None) -> str:
-	"""未显式传 ``--boss-bin`` 时使用的底层 CLI。
-
-	``boss`` 与 ``boss-mcp`` 是同一次安装的两个入口，都在运行本 server 的解释器
-	旁边。MCP 主机常用绝对路径启动 ``boss-mcp`` 且不继承登录 shell 的 PATH
-	（``uv tool install`` / ``pipx install`` 的入口目录不在其中），只按 PATH 找
-	``boss`` 会让全部工具调用失败；PATH 上若另有一份旧版 ``boss``，还会被静默
-	驱动（Issue #1066）。同目录入口不存在时才回退到按 PATH 查找。
-	"""
-	interpreter = sys.executable if executable is None else executable
-	if not interpreter:
-		# 嵌入式运行时 sys.executable 可能为空；不能据此落到当前目录下的同名文件。
-		return DEFAULT_BOSS_BIN
-	bin_dir = Path(interpreter).parent
-	on_windows = os.name == "nt" if windows is None else windows
-	for name in (("boss.exe", "boss") if on_windows else ("boss",)):
-		candidate = bin_dir / name
-		if candidate.is_file():
-			return str(candidate)
-	return DEFAULT_BOSS_BIN
 
 
 def _configure_boss_invocation(
@@ -145,89 +118,6 @@ def _configure_boss_invocation(
 	_BOSS_GLOBAL_ARGS = args
 
 
-# 子进程超时 / 取消时，只有明确只读的工具才能声明「可重放」。未列出的工具
-# （包括未来新增的）一律按「可能已产生平台副作用」处理：漏判只读只是保守，
-# 漏判写操作会让 Agent 直接重试一个可能已经生效的动作。
-_READ_ONLY_TOOL_NAMES = frozenset({
-	"boss_status",
-	"boss_doctor",
-	"boss_search",
-	"boss_recommend",
-	"boss_detail",
-	"boss_show",
-	"boss_history",
-	"boss_chat",
-	"boss_chatmsg",
-	"boss_me",
-	"boss_interviews",
-	"boss_cities",
-	"boss_pipeline",
-	"boss_follow_up",
-	"boss_digest",
-	"boss_stats",
-	"boss_export",
-	"boss_resume_list",
-	"boss_resume_show",
-	"boss_watch_list",
-	"boss_preset_list",
-	"boss_shortlist_list",
-	"boss_shortlist_compare",
-	"boss_favorites_list",
-	"boss_crawl_status",
-	"boss_crawl_results",
-	"boss_hr_whoami",
-	"boss_hr_applications",
-	"boss_hr_candidates",
-	"boss_hr_recommendations",
-	"boss_hr_chat",
-	"boss_hr_chatmsg",
-	"boss_hr_last_messages",
-	"boss_hr_resume",
-	"boss_hr_jobs",
-	"boss_hr_jobs_detail",
-})
-
-#: 工具名整体只读、但个别参数会把调用变成平台写操作。判定必须看参数：
-#: `boss_hr_jobs` 的 `action=online|offline` 会 POST 上线/下线，超时后若按只读
-#: 告诉 Agent「可直接重试」，就会在状态未知时重发一次状态变更（Issue #869）。
-_TOOL_WRITE_MODES: dict[str, frozenset[str]] = {
-	"boss_hr_jobs": frozenset({"online", "offline"}),
-}
-
-#: schema 里带 action 维度的工具。只读白名单中的这类工具读写取决于参数，必须在
-#: `_TOOL_WRITE_MODES` 显式登记（写模式可以是空集）；漏登记时按写处理，不让新增
-#: 的写 action 静默回到「超时也告诉 Agent 可直接重试」的旧缺陷（Issue #968）。
-_ACTION_DIMENSION_TOOL_NAMES = frozenset(
-	tool.name for tool in TOOLS if "action" in tool.input_schema.get("properties", {})
-)
-
-_WRITE_INTERRUPT_RECOVERY = "检查本地 checkpoint 与平台实际结果，再显式恢复；未确认的写操作不要直接重试"
-_READ_INTERRUPT_RECOVERY = "只读命令已中断，不产生平台写入；确认子进程已退出后可直接重新调用"
-#: 子进程没能启动：从未运行过，不可能有平台副作用。真正要处理的是安装 / 路径，
-#: 让 Agent 去核对 checkpoint 与平台结果只会把人引向不存在的现场（Issue #962）。
-_SPAWN_FAILURE_RECOVERY = (
-	"底层 boss CLI 未能启动，未产生任何平台操作；确认 boss-agent-cli 已安装且 boss 在 "
-	"MCP server 进程的 PATH 中，或用 boss-mcp --boss-bin 指定可执行文件路径后重新调用"
-)
-_READ_UNPARSEABLE_RECOVERY = (
-	"只读命令未返回 JSON 信封，不产生平台写入；按 error.message 排查，"
-	"升级 boss-agent-cli 后重新调用，仍出现时附上 error.message 提交 issue"
-)
-
-
-def _tool_may_write(tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
-	if tool_name not in _READ_ONLY_TOOL_NAMES:
-		return True
-	write_modes = _TOOL_WRITE_MODES.get(tool_name)
-	if write_modes is None:
-		# 带 action 维度却没有登记写模式：无法判断哪个动作会产生平台写入，按写处理
-		# （与「未列出的工具按写」同一保守原则）。守卫测试保证现有工具不会走到这里。
-		return tool_name in _ACTION_DIMENSION_TOOL_NAMES
-	# 缺省 action 与 schema 默认值一致（list）：只有显式声明写模式才算写。
-	action = (arguments or {}).get("action", "list")
-	return isinstance(action, str) and action in write_modes
-
-
 def _cli_timeout(args: tuple[str, ...]) -> float:
 	# A wizard deadline belongs to the child. The host allows bounded extra
 	# time for that child to commit its result/checkpoint and emit the envelope.
@@ -241,14 +131,7 @@ def _cli_timeout(args: tuple[str, ...]) -> float:
 	return _CLI_TIMEOUT_SECONDS
 
 
-def _cli_failure(
-	args: tuple[str, ...],
-	code: str,
-	message: str,
-	*,
-	recovery_action: str | None = None,
-	**details: Any,
-) -> dict[str, Any]:
+def _cli_failure(args: tuple[str, ...], code: str, message: str, **details: Any) -> dict[str, Any]:
 	command = args[0] if args else "mcp"
 	if command in {"agent", "hr", "ai", "resume", "watch", "crawl"} and len(args) > 1:
 		command = f"{command}.{args[1]}"
@@ -260,26 +143,14 @@ def _cli_failure(
 				code=code,
 				message=message,
 				recoverable=code != "CLI_ERROR" and not details.get("outcome_unknown", False),
-				recovery_action=recovery_action or _WRITE_INTERRUPT_RECOVERY,
+				recovery_action="检查本地 checkpoint 与平台实际结果，再显式恢复；未确认的写操作不要直接重试",
 				details=details or None,
 			)
 		),
 	)
 
 
-def _spawn_failure(args: tuple[str, ...], exc: OSError) -> dict[str, Any]:
-	return _cli_failure(
-		args,
-		"CLI_ERROR",
-		f"无法启动底层 boss CLI：{exc}",
-		recovery_action=_SPAWN_FAILURE_RECOVERY,
-		outcome_unknown=False,
-	)
-
-
-def _parse_cli_output(
-	args: tuple[str, ...], stdout: str, stderr: str, *, may_write: bool = True,
-) -> dict[str, Any]:
+def _parse_cli_output(args: tuple[str, ...], stdout: str, stderr: str) -> dict[str, Any]:
 	try:
 		parsed = json.loads(stdout)
 	except json.JSONDecodeError:
@@ -287,19 +158,11 @@ def _parse_cli_output(
 	if isinstance(parsed, dict):
 		return parsed
 	# CLI 契约保证 stdout 是 JSON 信封对象；拿到别的形状（解析失败或非对象）
-	# 一律按命令失败处理，而不是把非 dict 结果透传给调用方。进程已经运行过：
-	# 写工具的结果此时未知，与超时 / 取消同样标 outcome_unknown；只读工具没有
-	# 平台写入，不能套用「未确认的写操作不要直接重试」（Issue #962）。
-	return _cli_failure(
-		args,
-		"CLI_ERROR",
-		stderr or "命令执行失败",
-		recovery_action=_WRITE_INTERRUPT_RECOVERY if may_write else _READ_UNPARSEABLE_RECOVERY,
-		outcome_unknown=may_write,
-	)
+	# 一律按命令失败处理，而不是把非 dict 结果透传给调用方。
+	return _cli_failure(args, "CLI_ERROR", stderr or "命令执行失败")
 
 
-def _run_boss(*args: str, may_write: bool = True) -> dict[str, Any]:
+def _run_boss(*args: str) -> dict[str, Any]:
 	"""Synchronous compatibility entrypoint; MCP handlers use the async path."""
 	cmd = [_BOSS_BIN, "--json", *_BOSS_GLOBAL_ARGS, *args]
 	try:
@@ -311,16 +174,10 @@ def _run_boss(*args: str, may_write: bool = True) -> dict[str, Any]:
 			stdin=subprocess.DEVNULL,
 		)
 	except subprocess.TimeoutExpired:
-		return _cli_failure(
-			args,
-			"WORKFLOW_TIMEOUT",
-			"底层 CLI 超时",
-			outcome_unknown=may_write,
-			recovery_action=_WRITE_INTERRUPT_RECOVERY if may_write else _READ_INTERRUPT_RECOVERY,
-		)
+		return _cli_failure(args, "WORKFLOW_TIMEOUT", "底层 CLI 超时", outcome_unknown=True)
 	except OSError as exc:
-		return _spawn_failure(args, exc)
-	return _parse_cli_output(args, result.stdout, result.stderr, may_write=may_write)
+		return _cli_failure(args, "CLI_ERROR", str(exc))
+	return _parse_cli_output(args, result.stdout, result.stderr)
 
 
 async def _stop_cli_process(
@@ -365,31 +222,7 @@ async def _stop_cli_process(
 			return b"", b""
 
 
-def _interrupted_failure(
-	args: tuple[str, ...],
-	code: str,
-	stdout: bytes,
-	*,
-	may_write: bool,
-) -> dict[str, Any]:
-	# A child envelope can carry the committed checkpoint/run id. Killing a child
-	# never proves an action had no effect; both the spawn-time cancel path and the
-	# running-child path must surface that envelope (Issue #998).
-	try:
-		checkpoint_result = json.loads(stdout)
-	except (json.JSONDecodeError, UnicodeDecodeError):
-		checkpoint_result = None
-	return _cli_failure(
-		args,
-		code,
-		"MCP 调用已取消" if code == "WORKFLOW_STOPPED" else "底层 CLI 超时",
-		outcome_unknown=may_write,
-		recovery_action=_WRITE_INTERRUPT_RECOVERY if may_write else _READ_INTERRUPT_RECOVERY,
-		checkpoint_result=checkpoint_result if isinstance(checkpoint_result, dict) else None,
-	)
-
-
-async def _run_boss_async(*args: str, may_write: bool = True) -> dict[str, Any]:
+async def _run_boss_async(*args: str) -> dict[str, Any]:
 	if args and args[0] == "wizard" and not any(flag in args for flag in ("--timeout", "--status", "--stop")):
 		args = (*args, "--timeout", str(_CLI_TIMEOUT_SECONDS))
 	cmd = [_BOSS_BIN, "--json", *_BOSS_GLOBAL_ARGS, *args]
@@ -404,37 +237,35 @@ async def _run_boss_async(*args: str, may_write: bool = True) -> dict[str, Any]:
 	try:
 		process = await asyncio.shield(spawn)
 	except OSError as exc:
-		return _spawn_failure(args, exc)
+		return _cli_failure(args, "CLI_ERROR", str(exc))
 	except asyncio.CancelledError:
 		try:
 			process = await asyncio.shield(spawn)
-		except OSError as exc:
-			# The child never ran, so the interrupted call left no platform effect.
-			# Point at installation/path, not at a checkpoint that cannot exist
-			# (Issue #1000).
-			return _cli_failure(
-				args,
-				"WORKFLOW_STOPPED",
-				f"无法启动底层 boss CLI：{exc}",
-				outcome_unknown=False,
-				recovery_action=_SPAWN_FAILURE_RECOVERY,
-			)
+		except OSError:
+			return _cli_failure(args, "WORKFLOW_STOPPED", "MCP 调用已取消", outcome_unknown=False)
 		output = asyncio.create_task(process.communicate())
-		stdout, _ = await asyncio.shield(_stop_cli_process(process, output))
-		return _interrupted_failure(args, "WORKFLOW_STOPPED", stdout, may_write=may_write)
+		await asyncio.shield(_stop_cli_process(process, output))
+		return _cli_failure(args, "WORKFLOW_STOPPED", "MCP 调用已取消", outcome_unknown=True)
 	output = asyncio.create_task(process.communicate())
 	try:
 		stdout, stderr = await asyncio.wait_for(asyncio.shield(output), _cli_timeout(args))
 	except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
 		stdout, _ = await asyncio.shield(_stop_cli_process(process, output))
 		code = "WORKFLOW_STOPPED" if isinstance(exc, asyncio.CancelledError) else "WORKFLOW_TIMEOUT"
-		return _interrupted_failure(args, code, stdout, may_write=may_write)
-	return _parse_cli_output(
-		args,
-		stdout.decode("utf-8", errors="replace"),
-		stderr.decode("utf-8", errors="replace"),
-		may_write=may_write,
-	)
+		# A child envelope can carry the committed checkpoint/run id. Preserve it
+		# inside the failure; killing a child never proves an action had no effect.
+		try:
+			checkpoint_result = json.loads(stdout)
+		except (json.JSONDecodeError, UnicodeDecodeError):
+			checkpoint_result = None
+		return _cli_failure(
+			args,
+			code,
+			"MCP 调用已取消" if code == "WORKFLOW_STOPPED" else "底层 CLI 超时",
+			outcome_unknown=True,
+			checkpoint_result=checkpoint_result if isinstance(checkpoint_result, dict) else None,
+		)
+	return _parse_cli_output(args, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace"))
 
 
 # ── Handler 注册（mcp 2.x） ────────────────────────────────────────
@@ -451,107 +282,10 @@ async def list_tools(ctx: Any, params: "PaginatedRequestParams | None" = None) -
 	return ListToolsResult(tools=TOOLS)
 
 
-def _tool_argument_error(tool_name: str, message: str) -> CallToolResult:
-	return CallToolResult(
-		content=[
-			TextContent(
-				type="text",
-				text=envelope_error(tool_name, code="INVALID_PARAM", message=message),
-			)
-		],
-		is_error=True,
-	)
-
-
-def _declared_arguments(tool_name: str) -> set[str] | None:
-	tool = next((item for item in TOOLS if item.name == tool_name), None)
-	if tool is None:
-		return None
-	return set(tool.input_schema.get("properties", {}))
-
-
-_JSON_TYPE_CHECKS: dict[str, tuple[type, ...]] = {
-	"boolean": (bool,),
-	"integer": (int,),
-	"number": (int, float),
-	"string": (str,),
-	"array": (list,),
-	"object": (dict,),
-}
-
-
-def _argument_type_errors(tool_name: str, arguments: dict[str, Any]) -> list[str]:
-	"""按 inputSchema 校验参数类型，返回人类可读的错误列表。
-
-	`_build_args` 用 `is True` / truthiness 判断布尔参数：客户端把 `dry_run` /
-	`yes` 传成字符串时，标志位会被静默丢弃或反向生效（`"false"` 是 truthy），
-	写命令的预览 / 确认语义随之改变。类型错误必须在进入 CLI 之前拒绝。
-	"""
-	tool = next((item for item in TOOLS if item.name == tool_name), None)
-	if tool is None:
-		return []
-	properties = tool.input_schema.get("properties", {})
-	errors: list[str] = []
-	for key, value in arguments.items():
-		prop = properties.get(key)
-		if not isinstance(prop, dict):
-			continue
-		expected = prop.get("type")
-		if not isinstance(expected, str) or expected not in _JSON_TYPE_CHECKS:
-			continue
-		allowed = _JSON_TYPE_CHECKS[expected]
-		# Python 里 bool 是 int 子类；JSON 里 true/false 不是数字，反向也一样。
-		valid = isinstance(value, allowed) and (expected in {"boolean"} or not isinstance(value, bool))
-		if not valid:
-			errors.append(f"{key} 应为 {expected}，收到 {type(value).__name__}")
-	return errors
-
-
 async def call_tool(ctx: Any, params: CallToolRequestParams) -> CallToolResult:
-	arguments = dict(params.arguments or {})
-	declared = _declared_arguments(params.name)
-	if declared is None:
-		# 未知工具名不能落到 `boss <name>`：那只会得到 Click 的 "No such command"，
-		# Agent 看不到「工具不存在」与可用工具列表的指引。
-		return _tool_argument_error(
-			params.name,
-			f"未知工具：{params.name}；请调用 tools/list 获取可用工具",
-		)
-	unknown = sorted(set(arguments) - declared)
-	if unknown:
-		# 未知参数不能静默丢弃：给写工具多传一个 dry_run 也会被忽略，然后真实执行
-		# 投递/打招呼。与 CLI 对未知选项的处理一致，直接拒绝并指出参数名。
-		return _tool_argument_error(
-			params.name,
-			f"未知参数：{', '.join(unknown)}；请按 tools/list 的 inputSchema 传参",
-		)
-	type_errors = _argument_type_errors(params.name, arguments)
-	if type_errors:
-		# 类型错误同样不能交给 `_build_args` 的 truthiness 判断：`"false"` 是 truthy，
-		# `is True` 对 `"true"` 为假，`dry_run` / `yes` 会因此静默丢失或反向生效。
-		return _tool_argument_error(
-			params.name,
-			"参数类型错误：" + "；".join(type_errors) + "；请按 tools/list 的 inputSchema 传参",
-		)
-	try:
-		args = _build_args(params.name, arguments)
-	except KeyError as exc:
-		# 参数映射按 schema 直接取值；客户端漏传条件必填参数（如 resume/status 的
-		# run_id、online/offline 的 job_id）时会抛 KeyError。交给 SDK 只会变成
-		# JSON-RPC 的 "Internal server error"，Agent 拿不到任何可执行信息。这里按
-		# CLI 的错误信封返回，至少带上 INVALID_PARAM、缺失参数名与恢复指引。
-		missing = str(exc.args[0]) if exc.args else "参数"
-		return _tool_argument_error(params.name, f"缺少必填参数：{missing}")
-	except ValueError as exc:
-		# 映射层自己拒绝的非法枚举值（Issue #1002）：不能落进默认分支。
-		return _tool_argument_error(params.name, f"参数取值非法：{exc}")
-	result = await _run_boss_async(*args, may_write=_tool_may_write(params.name, arguments))
-	# 信封的 ok 是唯一真源，但 MCP 客户端还需要 is_error 才能把失败标成工具错误；
-	# 两者不一致时，ok:false 会被当成一次成功的工具调用。
-	return CallToolResult(
-		content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))],
-		is_error=result.get("ok") is False,
-	)
+	args = _build_args(params.name, dict(params.arguments or {}))
+	result = await _run_boss_async(*args)
+	return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))])
 
 
 server.add_request_handler("tools/list", PaginatedRequestParams, list_tools)
@@ -662,11 +396,7 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
 	parser.add_argument("--path", default=DEFAULT_HTTP_PATH, help="HTTP streaming 路径")
 	parser.add_argument("--sse-path", default=DEFAULT_SSE_PATH, help="SSE 建链路径")
 	parser.add_argument("--message-path", default=DEFAULT_MESSAGE_PATH, help="SSE 消息回传路径")
-	parser.add_argument(
-		"--boss-bin",
-		default=None,
-		help="底层 boss CLI 可执行文件路径（默认使用与 boss-mcp 同一安装的 boss 入口，找不到时按 PATH 查找）",
-	)
+	parser.add_argument("--boss-bin", default=DEFAULT_BOSS_BIN, help="底层 boss CLI 可执行文件路径")
 	parser.add_argument("--data-dir", default=None, help="传给 boss CLI 的数据目录，用于项目级状态隔离")
 	parser.add_argument("--platform", default=None, help="传给 boss CLI 的默认平台，如 zhipin")
 	parser.add_argument("--role", choices=("candidate", "recruiter"), default=None, help="传给 boss CLI 的默认角色")
@@ -683,7 +413,7 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(argv: list[str] | None = None) -> None:
 	args = _parse_cli_args(argv)
 	_configure_boss_invocation(
-		boss_bin=args.boss_bin or _default_boss_bin(),
+		boss_bin=args.boss_bin,
 		data_dir=args.data_dir,
 		platform=args.platform,
 		role=args.role,

@@ -1,11 +1,8 @@
-import csv
 import json
-import shlex
 import socket
 import sqlite3
 import sys
 import types
-import zipfile
 from hashlib import sha256
 from pathlib import Path
 
@@ -18,13 +15,7 @@ from boss_agent_cli.config import DEFAULTS
 from boss_agent_cli.crawler.exporter import write_run_outputs
 from boss_agent_cli.crawler.hooks import HOOK_SCRIPT_NAMES, HookInjection, HookRegistrationError, inject_hook_profile
 from boss_agent_cli.crawler.operations import crawl_results, import_crawl_shortlist
-from boss_agent_cli.crawler.service import (
-	CrawlBudget,
-	CrawlOutcome,
-	CrawlService,
-	CrawlSettings,
-	CrawlStopRequested,
-)
+from boss_agent_cli.crawler.service import CrawlBudget, CrawlService, CrawlSettings, CrawlStopRequested
 from boss_agent_cli.crawler.transport import JOBLIST_TARGET, CrawlRiskError, DrissionCrawlerSession
 from boss_agent_cli.main import cli
 
@@ -562,131 +553,6 @@ def test_listener_parses_string_json_response(monkeypatch, tmp_path):
 	assert session.fetch_page("AI", "101210100", 1)["zpData"]["jobList"][0]["encryptJobId"] == "job-1"
 
 
-class _PagingPage:
-	"""Fake tab whose visible job list starts at page 1 and only advances by scrolling."""
-
-	url = "https://www.zhipin.com/web/geek/jobs"
-	html = "<div class='job-list-box'></div>"
-
-	def __init__(self, last_page: int = 5) -> None:
-		self.last_page = last_page
-		self.current_page = 1
-		self.navigations = 0
-		self.scrolls = 0
-		self.listen = types.SimpleNamespace(
-			start=lambda *args, **kwargs: None,
-			stop=lambda: None,
-			wait=self._packet,
-		)
-		self.scroll = types.SimpleNamespace(down=lambda *args: None, to_bottom=self._next_page)
-
-	def get(self, url: str) -> None:
-		self.navigations += 1
-		self.current_page = 1
-
-	def _next_page(self) -> None:
-		self.scrolls += 1
-		self.current_page = min(self.last_page, self.current_page + 1)
-
-	def _packet(self, **kwargs):
-		page = self.current_page
-		body = {
-			"code": 0,
-			"zpData": {
-				"jobList": [{"encryptJobId": f"job-{page}"}],
-				"hasMore": page < self.last_page,
-			},
-		}
-		return types.SimpleNamespace(response=types.SimpleNamespace(body=body))
-
-
-def _paging_session(tmp_path: Path, monkeypatch, last_page: int = 5):
-	page = _PagingPage(last_page)
-	session = DrissionCrawlerSession(
-		profile_path=tmp_path / "profile",
-		chrome_path=None,
-		cdp_port=_free_port(),
-		hook_profile="none",
-		hook_dir=None,
-	)
-	session._page = page
-	monkeypatch.setattr("boss_agent_cli.crawler.transport.cancellable_sleep", lambda *args, **kwargs: None)
-	return session, page
-
-
-def test_fetch_page_aligns_visible_list_with_requested_page_after_resume(tmp_path, monkeypatch):
-	"""断点恢复从第 3 页开始时，不能把第 1 页响应当成第 3 页（Issue #897）。"""
-	session, page = _paging_session(tmp_path, monkeypatch)
-
-	payload = session.fetch_page("AI", "101210100", 3)
-
-	assert payload["zpData"]["jobList"][0]["encryptJobId"] == "job-3"
-	assert page.navigations == 1
-	assert page.scrolls == 2
-	assert session._page_no == 3
-
-	payload = session.fetch_page("AI", "101210100", 4)
-
-	assert payload["zpData"]["jobList"][0]["encryptJobId"] == "job-4"
-	assert page.navigations == 1
-	assert page.scrolls == 3
-
-
-def test_fetch_page_retry_renavigates_instead_of_reusing_stale_position(tmp_path, monkeypatch):
-	"""同一页重试要重新导航：上一次停在该页不代表这一次请求已经发出。"""
-	session, page = _paging_session(tmp_path, monkeypatch)
-
-	assert session.fetch_page("AI", "101210100", 2)["zpData"]["jobList"][0]["encryptJobId"] == "job-2"
-	assert page.navigations == 1
-	assert page.scrolls == 1
-
-	assert session.fetch_page("AI", "101210100", 2)["zpData"]["jobList"][0]["encryptJobId"] == "job-2"
-	assert page.navigations == 2
-	assert page.scrolls == 2
-
-
-def test_resume_fetches_checkpoint_page_and_keeps_exported_page_numbers_aligned(tmp_path, monkeypatch):
-	"""从 next_page=3 恢复时，浏览器页与落库 page_no 必须一致，且不重复抓已见页。"""
-	page = _PagingPage(last_page=5)
-	session = DrissionCrawlerSession(
-		profile_path=tmp_path / "profile",
-		chrome_path=None,
-		cdp_port=_free_port(),
-		hook_profile="none",
-		hook_dir=None,
-	)
-	session._page = page
-	session.open = lambda: []
-	monkeypatch.setattr("boss_agent_cli.crawler.transport.cancellable_sleep", lambda *args, **kwargs: None)
-	cache = CacheStore(tmp_path / "cache.db")
-	service = CrawlService(
-		cache,
-		data_dir=tmp_path,
-		transport_factory=lambda settings: session,
-		budget_factory=lambda store: _NoDelayBudget(store),
-	)
-	run_id = service.create(_settings(tmp_path, pages=5))
-	for page_no in (1, 2):
-		cache.put_crawl_job(
-			run_id, f"job-{page_no}", page_no, {"job_id": f"job-{page_no}"}, detail_done=False
-		)
-	cache.update_crawl_run(run_id, status="stopped", next_page=3)
-
-	outcome = service.resume(run_id, operating_mode="research")
-
-	assert outcome.status == "completed"
-	assert outcome.requests_attempted == 3, "只应请求第 3、4、5 页，不能重复抓第 1、2 页"
-	assert page.current_page == 5
-	assert {item["job_key"]: item["page_no"] for item in cache.list_crawl_jobs(run_id)} == {
-		"job-1": 1,
-		"job-2": 2,
-		"job-3": 3,
-		"job-4": 4,
-		"job-5": 5,
-	}
-	cache.close()
-
-
 def test_non_json_login_html_is_not_mislabelled_as_captcha_only():
 	session = DrissionCrawlerSession(
 		profile_path=Path("/tmp/profile"),
@@ -715,25 +581,6 @@ def test_crawl_writes_outputs_and_reuses_cached_detail(tmp_path):
 	assert sheet.row_dimensions[2].height == 20
 
 
-@pytest.mark.parametrize("fail_first_page", [False, True])
-def test_service_outcome_keeps_data_directory_in_checkpoint(tmp_path, fail_first_page):
-	"""真实运行及已完成任务的快捷返回都必须绑定原数据目录。"""
-	data_dir = tmp_path / "state 'one'; $STATE"
-	transport = _FakeTransport({1: _page()}, fail_pages={1} if fail_first_page else set())
-	cache, service = _service(data_dir, lambda settings: transport)
-	with cache:
-		outcome = service.create_and_run(_settings(data_dir, max_retries=0))
-		assert outcome.status == ("stopped" if fail_first_page else "completed")
-		outcomes = [outcome]
-		if not fail_first_page:
-			outcomes.append(service.resume(outcome.run_id))
-		for item in outcomes:
-			assert shlex.split(item.as_dict()["checkpoint"]["resume_command"]) == [
-				"boss", "--data-dir", str(data_dir.resolve()), "crawl", "resume", outcome.run_id,
-			]
-		assert transport.page_calls == [1]
-
-
 def test_crawl_honors_page_limit_and_resume_deduplicates(tmp_path):
 	first = _FakeTransport({1: _page(_job("job-1", "sec-1"), has_more=True), 2: _page(code=37)})
 	second = _FakeTransport({2: _page(_job("job-2", "sec-2"), has_more=False)})
@@ -748,33 +595,6 @@ def test_crawl_honors_page_limit_and_resume_deduplicates(tmp_path):
 	resumed = service.resume(stopped.run_id, operating_mode="research")
 	assert resumed.status == "completed"
 	assert [item["job_key"] for item in cache.list_crawl_jobs(stopped.run_id)] == ["job-1", "job-2"]
-
-
-def test_crawl_risk_error_does_not_embed_platform_message():
-	"""CrawlRiskError.from_response 不能把平台响应 message 拼进异常文本。"""
-	from boss_agent_cli.crawler.transport import CrawlRiskError
-	from boss_agent_cli.display import risk_error_message
-
-	error = CrawlRiskError.from_response({"code": 36, "message": "fixture-platform-response-token"})
-	assert "fixture-platform-response-token" not in str(error)
-	assert risk_error_message("ACCOUNT_RISK") in str(error)
-
-
-def test_crawl_platform_risk_error_uses_registry_message(tmp_path):
-	"""爬虫运行结果里的 error 字段只保留登记表文案，不透传异常原文。"""
-	from boss_agent_cli.api.client import AccountRiskError
-	from boss_agent_cli.display import risk_error_message
-
-	class _RiskTransport(_FakeTransport):
-		def fetch_page(self, query: str, city_code: str, page_no: int):
-			raise AccountRiskError("fixture-platform-response-token", is_cdp=True)
-
-	transport = _RiskTransport()
-	_, service = _service(tmp_path, lambda settings: transport)
-	outcome = service.create_and_run(_settings(tmp_path))
-	assert outcome.status == "risk_stopped"
-	assert outcome.error == risk_error_message("ACCOUNT_RISK")
-	assert "fixture-platform-response-token" not in outcome.error
 
 
 def test_risk_stop_keeps_browser_open(tmp_path):
@@ -808,97 +628,6 @@ def test_crawl_retries_once_then_checkpoints(tmp_path):
 	assert outcome.status == "stopped"
 	assert transport.page_calls == [1, 1]
 	assert cache.get_crawl_run(outcome.run_id)["error"] == "listener timeout"
-
-
-@pytest.mark.parametrize(
-	"payload",
-	[
-		{"code": 0},
-		{"code": 0, "zpData": None},
-		{"code": 0, "zpData": []},
-		{"code": 0, "zpData": {}},
-		{"code": 0, "zpData": {"jobList": None}},
-		{"code": 0, "zpData": {"jobList": {}}},
-	],
-)
-def test_incomplete_list_response_preserves_page_for_resume(tmp_path, payload):
-	"""缺少列表结构不能当成空页提交断点；有限重试后恢复仍须补取原页。"""
-	first = _FakeTransport({1: payload})
-	second = _FakeTransport({1: _page(_job("job-1", "sec-1"))})
-	transports = iter((first, second))
-	cache, service = _service(tmp_path, lambda settings: next(transports))
-	with cache:
-		stopped = service.create_and_run(_settings(tmp_path, pages=1, max_retries=1))
-		assert stopped.status == "stopped"
-		assert stopped.next_page == 1
-		assert first.page_calls == [1, 1]
-		assert first.closed is True
-		assert cache.list_crawl_jobs(stopped.run_id) == []
-		checkpoint = cache.get_crawl_run(stopped.run_id)
-		assert checkpoint["next_page"] == 1
-		assert checkpoint["list_finished"] is False
-
-		resumed = service.resume(stopped.run_id)
-		assert resumed.status == "completed"
-		assert second.page_calls == [1]
-		assert resumed.jobs_seen == 1
-		assert [row["job_key"] for row in cache.list_crawl_jobs(stopped.run_id)] == ["job-1"]
-
-
-def test_explicit_empty_detail_card_still_completes(tmp_path):
-	"""显式空详情与缺失结构不同，沿用既有的完成语义。"""
-	transport = _FakeTransport(
-		{1: _page(_job("job-1", "sec-1"))},
-		detail_payloads={"sec-1": {"code": 0, "zpData": {"jobCard": {}}}},
-	)
-	cache, service = _service(tmp_path, lambda settings: transport)
-	with cache:
-		outcome = service.create_and_run(_settings(tmp_path, with_detail=True))
-		assert outcome.status == "completed"
-		assert transport.detail_calls == ["sec-1"]
-		assert cache.list_crawl_jobs(outcome.run_id)[0]["detail_done"] is True
-
-
-@pytest.mark.parametrize(
-	"payload",
-	[
-		{"code": 0},
-		{"code": 0, "zpData": None},
-		{"code": 0, "zpData": []},
-		{"code": 0, "zpData": {}},
-		{"code": 0, "zpData": {"jobCard": None}},
-		{"code": 0, "zpData": {"jobCard": []}},
-	],
-)
-def test_incomplete_detail_response_stays_pending_for_resume(tmp_path, payload):
-	"""缺少详情结构不能标为 fetched；恢复只补取详情，不重抓已提交列表。"""
-	first = _FakeTransport(
-		{1: _page(_job("job-1", "sec-1"))}, detail_payloads={"sec-1": payload},
-	)
-	second = _FakeTransport()
-	transports = iter((first, second))
-	cache, service = _service(tmp_path, lambda settings: next(transports))
-	with cache:
-		stopped = service.create_and_run(_settings(tmp_path, with_detail=True, max_retries=1))
-		assert stopped.status == "stopped"
-		assert stopped.next_page == 2
-		assert first.page_calls == [1]
-		assert first.detail_calls == ["sec-1", "sec-1"]
-		assert first.closed is True
-		pending = cache.list_crawl_jobs(stopped.run_id)
-		assert len(pending) == 1
-		assert pending[0]["detail_done"] is False
-		assert pending[0]["payload"]["detail_status"] == "not_requested"
-		assert cache.get_job_desc("job-1") is None
-
-		resumed = service.resume(stopped.run_id, with_detail=True)
-		assert resumed.status == "completed"
-		assert second.page_calls == []
-		assert second.detail_calls == ["sec-1"]
-		completed = cache.list_crawl_jobs(stopped.run_id)
-		assert completed[0]["detail_done"] is True
-		assert completed[0]["payload"]["detail_status"] == "fetched"
-		assert completed[0]["payload"]["post_description"] == "职位描述"
 
 
 def test_budget_stops_and_persists_across_resume(tmp_path):
@@ -983,28 +712,6 @@ def test_crawl_selector_import_is_stable_private_and_validated(tmp_path):
 			raise AssertionError("expected selector validation error")
 
 
-def test_crawl_shortlist_import_dedupes_rotating_security_id(tmp_path):
-	"""同一职位重新采集后 security_id 已轮换，再次导入不能重复进候选池（Issue #899）。"""
-	cache = CacheStore(tmp_path / "cache.db")
-	for run_id, security_id in (("run-1", "sec-request-1"), ("run-2", "sec-request-2")):
-		cache.create_crawl_run(run_id, _settings(tmp_path).as_dict(), str(tmp_path / "crawl" / "runs" / run_id))
-		cache.put_crawl_job(run_id, "job-1", 1, {
-			"job_id": "job-1", "security_id": security_id, "title": "职位", "company": "公司",
-		}, detail_done=False)
-
-	first = import_crawl_shortlist(cache, "run-1", include_all=True)
-	assert first["imported_count"] == 1
-	assert cache.set_shortlist_tags("sec-request-1", "job-1", ["重点"]) is True
-
-	second = import_crawl_shortlist(cache, "run-2", include_all=True)
-	assert second["imported_count"] == 0
-	assert second["existing_count"] == 1
-	assert second["imported"] == []
-	items = cache.list_shortlist()
-	assert [item["job_id"] for item in items] == ["job-1"]
-	assert items[0]["tags"] == ["重点"]
-
-
 def test_crawl_selector_migration_backfills_legacy_rows(tmp_path):
 	db_path = tmp_path / "legacy.db"
 	with sqlite3.connect(db_path) as connection:
@@ -1081,58 +788,3 @@ def test_exporter_formats_workbook(tmp_path):
 	assert sheet.column_dimensions["P"].width == 54
 	assert sheet["P2"].alignment.wrap_text is not True
 	assert sheet.row_dimensions[2].height == 20
-
-
-def test_exporter_neutralizes_formula_prefixed_values(tmp_path):
-	"""平台原文以 =+-@ 开头时不能落成公式：CSV 与 XLSX 都要按文本处理（Issue #871）。
-
-	JD 常见的 `=====岗位职责=====` 分隔线和 `- 负责…` 列表项都会命中；openpyxl
-	对以 `=` 开头的字符串默认写 `<f>` 公式节点，Excel 打开时报错或直接求值。
-	"""
-	paths = write_run_outputs(
-		tmp_path,
-		[
-			{
-				"title": "=SUM(A1:A9)",
-				"company": "-1+1",
-				"city": "@cmd",
-				"post_description": "=====岗位职责=====\n- 负责后端开发",
-			},
-			{"title": "Python 开发", "company": "正常公司"},
-		],
-	)
-	with open(paths["csv"], encoding="utf-8-sig", newline="") as file:
-		rows = list(csv.DictReader(file))
-	assert rows[0]["title"] == "'=SUM(A1:A9)"
-	assert rows[0]["company"] == "'-1+1"
-	assert rows[0]["city"] == "'@cmd"
-	assert rows[0]["post_description"].startswith("'=====岗位职责=====")
-	# 正常值不能被顺手改写。
-	assert rows[1]["title"] == "Python 开发"
-
-	with zipfile.ZipFile(paths["xlsx"]) as archive:
-		sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode()
-	assert "<f>" not in sheet_xml
-
-	sheet = load_workbook(paths["xlsx"]).active
-	# XLSX 保留原值，只把它声明为文本；不能像 CSV 那样插入可见单引号。
-	assert sheet["D2"].value == "=SUM(A1:A9)"
-	assert sheet["D2"].data_type == "s"
-	assert sheet["I2"].value == "-1+1"
-	assert sheet["I2"].data_type == "s"
-	assert sheet["D3"].value == "Python 开发"
-
-
-def test_crawl_outcome_quotes_run_id_in_resume_command():
-	"""outcome.checkpoint.resume_command 会被直接执行，run_id 必须按 shell 参数转义。"""
-	outcome = CrawlOutcome(
-		run_id="run; echo pwn",
-		status="stopped",
-		next_page=1,
-		pages_completed=0,
-		jobs_seen=0,
-		detail_checks=0,
-		output_paths={},
-		hooks=(),
-	)
-	assert outcome.as_dict()["checkpoint"]["resume_command"] == "boss crawl resume 'run; echo pwn'"

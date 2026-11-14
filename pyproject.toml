@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "boss-agent-cli"
-version = "3.4.11"
+version = "3.0.1"
 description = "AI Agent 专用的 BOSS 直聘求职 CLI 工具"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [
 	{name = "can4hou6joeng4"},
@@ -19,6 +19,7 @@ classifiers = [
 	"Intended Audience :: Developers",
 	"License :: OSI Approved :: MIT License",
 	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.10",
 	"Programming Language :: Python :: 3.11",
 	"Programming Language :: Python :: 3.12",
 	"Programming Language :: Python :: 3.13",
@@ -34,19 +35,10 @@ dependencies = [
 	# **构造 client 时**就抛 ImportError，于是 `ALL_PROXY=socks5://...` 的用户每一条
 	# 走 httpx 的命令都失败。CI runner 环境干净、没有代理变量，这条路径在门禁上
 	# 永远是绿的（同 scripts/verify_release.py --fresh-install 守的那道缝）。
-	# [http2] 拉的是 h2（纯 Python）。真实页面的所有业务请求都是 HTTP/2，而 httpx
-	# 默认 http2=False 走 HTTP/1.1——协议版本本身就是可观察的差异。缺 h2 时
-	# http2=True 会在**构造 client 时**抛 ImportError，与上面 socks 同一类风险，
-	# 所以放进必装依赖而不是 extra。
-	"httpx[socks,http2]>=0.27",
-	# 声明 Accept-Encoding: br, zstd 就必须真的能解码：否则服务端一旦按 br 返回，
-	# httpx 会拿不到解码器而报错。真机发的是 gzip, deflate, br, zstd，这两个包
-	# 让 httpx 的解码器集合与之匹配，而不是只声明不实现。
-	"brotli>=1.1",
-	"zstandard>=0.22",
+	"httpx[socks]>=0.27",
 	"cryptography>=42.0",
 	"patchright>=1.58.2",
-	"browser-cookie3>=0.20.0",
+	"browser-cookie3>=0.16.2",
 	"rich>=13.0",
 	"prompt-toolkit>=3.0.43",
 	"pyyaml>=6.0",
@@ -66,8 +58,6 @@ dev = [
 	"pre-commit>=3.0",
 	# pre-commit 的传递依赖：避开激活脚本与种子包处理的已知安全问题。
 	"virtualenv>=21.7.13,<22.0.0",
-	# virtualenv / 工具链传递依赖：filelock 4.2.1+ 修复多项本地锁文件安全问题，且要求 Python ≥3.11。
-	"filelock>=4.2.1,<5.0.0",
 	"mypy>=1.20",
 	"types-PyYAML>=6.0",
 ]
@@ -97,7 +87,7 @@ crawl = [
 
 [project.scripts]
 boss = "boss_agent_cli.main:cli"
-boss-mcp = "boss_agent_cli.mcp_entrypoint:run"
+boss-mcp = "boss_agent_cli.mcp_server:run"
 
 [tool.hatch.build]
 exclude = [
@@ -135,7 +125,7 @@ select = ["E4", "E7", "E9", "F"]
 indent-style = "tab"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 # 渐进接入：仅跑基础类型检查，允许现有未注解函数存在
 # 目标：先覆盖报错→逐模块消化→最终切 --strict
 ignore_missing_imports = true
@@ -164,8 +154,6 @@ module = [
 	"boss_agent_cli.resume.store",
 	"boss_agent_cli.commands.cities",
 	"boss_agent_cli.services.chat_utils",
-	"boss_agent_cli.services.pagination",
-	"boss_agent_cli.services.install_extras",
 	"boss_agent_cli.commands.history",
 	"boss_agent_cli.commands.login",
 	"boss_agent_cli.commands.logout",
@@ -203,7 +191,6 @@ module = [
 	"boss_agent_cli.ai.prompts",
 	"boss_agent_cli.resume.templates",
 	"boss_agent_cli.resume.export",
-	"boss_agent_cli.auth.identity",
 	"boss_agent_cli.auth.token_store",
 	"boss_agent_cli.auth.cookie_extract",
 	"boss_agent_cli.auth.curl_import",
@@ -219,12 +206,12 @@ module = [
 	"boss_agent_cli.commands.chat_summary",
 	"boss_agent_cli.cache.store",
 	"boss_agent_cli.auth.manager",
+	"boss_agent_cli.auth.qr_login",
 	"boss_agent_cli.api.client",
 	"boss_agent_cli.api._base_client",
 	"boss_agent_cli.api.browser_client",
 	"boss_agent_cli.api.browser_source",
 	"boss_agent_cli.auth.browser",
-	"boss_agent_cli.auth.login_diagnostics",
 	"boss_agent_cli.platforms",
 	"boss_agent_cli.platforms.base",
 	"boss_agent_cli.platforms.zhipin",
@@ -250,14 +237,12 @@ module = [
 	"boss_agent_cli.platforms.recruiter_base",
 	"boss_agent_cli.platforms.zhipin_recruiter",
 	"boss_agent_cli.commands.recruiter",
-	"boss_agent_cli.commands.recruiter._hints",
 	"boss_agent_cli.commands.recruiter.applications",
 	"boss_agent_cli.commands.recruiter.candidates",
 	"boss_agent_cli.commands.recruiter.chat",
 	"boss_agent_cli.commands.recruiter.jobs",
 	"boss_agent_cli.commands.recruiter.reply",
 	"boss_agent_cli.commands.recruiter.recommendations",
-	"boss_agent_cli.commands.recruiter.location",
 	"boss_agent_cli.commands.recruiter.accept_resume",
 	"boss_agent_cli.commands.recruiter.download_resume",
 	"boss_agent_cli.commands.recruiter.request_resume",
@@ -275,8 +260,6 @@ module = [
 	"boss_agent_cli.commands.register",
 	"boss_agent_cli.services.contact_lookup",
 	"boss_agent_cli.services.friend_list_pages",
-	"boss_agent_cli.services.output_path",
-	"boss_agent_cli.services.private_files",
 	"boss_agent_cli.commands._recruiter_platform",
 	"boss_agent_cli.commands.crawl",
 	"boss_agent_cli.crawler.exporter",
@@ -285,7 +268,6 @@ module = [
 	"boss_agent_cli.crawler.service",
 	"boss_agent_cli.crawler.transport",
 	"boss_agent_cli.mcp_args",
-	"boss_agent_cli.mcp_entrypoint",
 	"boss_agent_cli.mcp_server",
 	"boss_agent_cli.mcp_tools",
 	"boss_agent_cli.schema",
@@ -303,33 +285,7 @@ module = [
 	"boss_agent_cli.platforms.factory",
 	"boss_agent_cli.commands._login_errors",
 	"boss_agent_cli.commands._contact_lookup",
-	"boss_agent_cli.commands._filter_errors",
-	"boss_agent_cli.commands._output_path",
 	"boss_agent_cli.api.browser_urls",
-	"boss_agent_cli.api.cdp_risk_lock",
-	"boss_agent_cli.api.egress",
-	"boss_agent_cli.api.proxy",
-	"boss_agent_cli.auth.page_identity",
-	"boss_agent_cli.commands.wizard",
-	"boss_agent_cli.services.json_files",
-	"boss_agent_cli.services.file_lock",
-	"boss_agent_cli.wizard.actions",
-	"boss_agent_cli.wizard.catalog",
-	"boss_agent_cli.wizard.live_crawl",
-	"boss_agent_cli.wizard.models",
-	"boss_agent_cli.wizard.preflight",
-	"boss_agent_cli.wizard.prompts",
-	"boss_agent_cli.wizard.renderer",
-	"boss_agent_cli.wizard.runner",
-	"boss_agent_cli.wizard.store",
-	"boss_agent_cli.ai",
-	"boss_agent_cli.api",
-	"boss_agent_cli.auth",
-	"boss_agent_cli.cache",
-	"boss_agent_cli.commands",
-	"boss_agent_cli.crawler",
-	"boss_agent_cli.resume",
-	"boss_agent_cli.wizard",
 ]
 disallow_untyped_defs = true
 disallow_any_generics = true

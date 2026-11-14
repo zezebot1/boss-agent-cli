@@ -27,18 +27,11 @@ def _tool_availability(tool_name: str) -> dict[str, Any] | None:
 
 
 def _decorate_tool_descriptions() -> None:
-	"""保留旧 wrapper 的入口；初始目录由共享 builder 装饰。
-
-	兼容入口可能拿到已装饰的描述（TOOLS 由 `build_tool_catalog` 构造时就带可用性），
-	重复调用只补缺失项，避免叠加出「可用性: 可用性: ...」。
-	"""
+	"""保留旧 wrapper 的入口；初始目录由共享 builder 装饰。"""
 	for tool in TOOLS:
 		availability = _tool_availability(tool.name)
 		if availability:
-			note = availability_note(availability)
-			description = tool.description or ""
-			if note not in description:
-				tool.description = f"{description} [{note}]"
+			tool.description = f"{tool.description} [可用性: {availability_note(availability)}]"
 
 
 def _crawl_task_tools() -> list[Tool]:
@@ -67,7 +60,6 @@ _MCP_TOOL_COMPLIANCE_COMMAND_OVERRIDES = {
 	"boss_hr_download_resume": "recruiter-download-resume",
 	"boss_hr_recommendations": "recruiter-recommendations",
 	"boss_hr_greet": "recruiter-greet",
-	"boss_hr_location": "recruiter-location",
 }
 
 

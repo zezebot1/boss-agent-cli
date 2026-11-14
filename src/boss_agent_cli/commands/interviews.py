@@ -1,9 +1,8 @@
 import click
 
-from boss_agent_cli.api.models import field_list
 from boss_agent_cli.auth.manager import AuthManager
 from boss_agent_cli.commands._platform import get_platform_instance
-from boss_agent_cli.display import auth_required_hints, boss_command_for_ctx, handle_auth_errors, handle_error_output, handle_not_supported, handle_output, handle_platform_error_output, login_action_for_ctx, render_simple_list
+from boss_agent_cli.display import boss_command_for_ctx, handle_auth_errors, handle_error_output, handle_not_supported, handle_output, handle_platform_error_output, login_action_for_ctx, render_simple_list
 from typing import Any
 
 
@@ -24,7 +23,6 @@ def interviews_cmd(ctx: click.Context) -> None:
 			code="AUTH_REQUIRED",
 			message=f"未登录，请先执行 {login_action}",
 			recoverable=True, recovery_action=login_action,
-			hints=auth_required_hints(ctx),
 		)
 		return
 
@@ -38,7 +36,7 @@ def interviews_cmd(ctx: click.Context) -> None:
 			handle_platform_error_output(ctx, "interviews", platform, raw, fallback_message="面试邀请获取失败")
 			return
 		platform_data = platform.unwrap_data(raw) or {}
-		interview_list = field_list(platform_data, "interviewList")
+		interview_list = platform_data.get("interviewList", [])
 
 	items = [
 		{
@@ -64,7 +62,7 @@ def interviews_cmd(ctx: click.Context) -> None:
 			],
 		)
 
-	hints: dict[str, Any] = {"next_actions": [boss_command_for_ctx(ctx, "search <query>", include_data_dir=True)]}
+	hints: dict[str, Any] = {"next_actions": [boss_command_for_ctx(ctx, "search <query>")]}
 
 	handle_output(
 		ctx, "interviews", items,

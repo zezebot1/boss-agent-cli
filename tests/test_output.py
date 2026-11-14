@@ -1,11 +1,7 @@
-import ast
 import json
-from pathlib import Path
-
 import pytest
 
 from boss_agent_cli.output import envelope_success, envelope_error, emit_error, emit_success, Logger
-from boss_agent_cli.schema.error_codes import ERROR_CODES
 
 
 def test_envelope_success_minimal():
@@ -180,39 +176,6 @@ def test_envelope_error():
 	assert parsed["hints"]["cookie"] == "[REDACTED]"
 
 
-def test_envelope_error_fills_contract_from_registry():
-	"""只传 code / message 时按错误码登记表补齐元数据。"""
-	from boss_agent_cli.schema.error_codes import ERROR_CODES
-
-	parsed = json.loads(envelope_error("search", code="NETWORK_ERROR", message="请求失败"))
-	assert parsed["error"]["recoverable"] is ERROR_CODES["NETWORK_ERROR"]["recoverable"]
-	assert parsed["error"]["recovery_action"] == ERROR_CODES["NETWORK_ERROR"]["recovery_action"]
-
-
-def test_envelope_error_explicit_contract_wins_over_registry():
-	"""显式 False 表示调用方判定不可重试，不能被登记表的 True 覆盖。"""
-	from boss_agent_cli.schema.error_codes import ERROR_CODES
-
-	assert ERROR_CODES["NETWORK_ERROR"]["recoverable"] is True
-	parsed = json.loads(
-		envelope_error(
-			"search",
-			code="NETWORK_ERROR",
-			message="请求失败",
-			recoverable=False,
-			recovery_action="不要自动重试",
-		)
-	)
-	assert parsed["error"]["recoverable"] is False
-	assert parsed["error"]["recovery_action"] == "不要自动重试"
-
-
-def test_envelope_error_unknown_code_keeps_empty_contract():
-	parsed = json.loads(envelope_error("search", code="NOT_REGISTERED_CODE", message="未知错误"))
-	assert parsed["error"]["recoverable"] is False
-	assert parsed["error"]["recovery_action"] is None
-
-
 def test_envelope_error_redacts_sensitive_values_inside_message():
 	result = envelope_error(
 		"search",
@@ -229,21 +192,6 @@ def test_envelope_error_redacts_sensitive_values_inside_message():
 	assert "hunter2" not in message
 	assert "auth-secret" not in message
 	assert message.count("[REDACTED]") == 5
-
-
-def test_redaction_stops_at_cjk_punctuation() -> None:
-	"""凭据值在全角标点处结束，标点及其后的中文说明必须保留。
-
-	旧实现用 ``[^\\s,;]+`` 匹配值，全角标点不是终止符：``stoken=abc）`` 会把
-	右括号吞进 ``[REDACTED]``，``Bearer x，然后`` 连后续中文一起消失，
-	``boss status`` 的就绪详情里因此出现过缺右括号的文案。
-	"""
-	from boss_agent_cli.output import redact_sensitive_text
-
-	assert redact_sensitive_text("（cookies=14, stoken=abc123）") == "（cookies=14, stoken=[REDACTED]）"
-	assert redact_sensitive_text("token=abc.def。") == "token=[REDACTED]。"
-	assert redact_sensitive_text("Authorization: Bearer eyJ.payload.sig，然后") == "Authorization: [REDACTED]，然后"
-	assert redact_sensitive_text("cookie: sessionid=xyz；继续") == "cookie: [REDACTED]；继续"
 
 
 def test_logger_filters_by_level(capsys):
@@ -293,7 +241,7 @@ def test_emit_error_redacts_sensitive_text_at_stdout_boundary(capsys):
 def test_config_defaults():
 	from boss_agent_cli.config import load_config
 	cfg = load_config(None)
-	assert cfg["request_delay"] == [30.0, 60.0]
+	assert cfg["request_delay"] == [1.5, 3.0]
 	assert cfg["log_level"] == "error"
 
 
@@ -305,7 +253,7 @@ def test_config_from_file(tmp_path):
 	cfg = load_config(cfg_file)
 	assert cfg["export_dir"] == "/tmp/exports"
 	assert cfg["log_level"] == "debug"
-	assert cfg["request_delay"] == [30.0, 60.0]
+	assert cfg["request_delay"] == [1.5, 3.0]
 
 
 # --- hints 双受众通道契约（operator_actions） ---
@@ -456,129 +404,3 @@ def test_status_envelope_exposes_token_expiry():
 	payload = json.loads(envelope_success("status", {"logged_in": True, "token_expires_in": 7200}))
 
 	assert payload["data"]["token_expires_in"] == 7200
-
-
-def test_error_details_normalize_retry_safety_across_cli_and_mcp_shapes():
-	cli_shape = json.loads(
-		envelope_error(
-			"greet",
-			code="ACTION_UNCONFIRMED",
-			message="请求结果未确认",
-			details={"outcome": "unknown", "replay_safe": False, "reason": "transport_error"},
-		)
-	)
-	details = cli_shape["error"]["details"]
-	assert details["outcome"] == "unknown"
-	assert details["replay_safe"] is False
-	assert details["outcome_unknown"] is True
-
-	mcp_shape = json.loads(
-		envelope_error(
-			"wizard",
-			code="WORKFLOW_TIMEOUT",
-			message="底层 CLI 超时",
-			details={"outcome_unknown": True},
-		)
-	)
-	details = mcp_shape["error"]["details"]
-	assert details["outcome_unknown"] is True
-	assert details["replay_safe"] is False
-
-
-def test_error_details_leave_replay_safe_reads_without_unknown_flag():
-	# 读取被中断时重试没有副作用：outcome 未知但 replay_safe=true，不应被标成禁止重试。
-	payload = json.loads(
-		envelope_error(
-			"detail",
-			code="NETWORK_ERROR",
-			message="浏览器读取请求中断",
-			details={"outcome": "unknown", "replay_safe": True},
-		)
-	)
-	details = payload["error"]["details"]
-	assert details["replay_safe"] is True
-	assert "outcome_unknown" not in details
-
-
-def test_unknown_outcome_details_always_declare_replay_safety():
-	"""``outcome="unknown"`` 必须与显式的 ``replay_safe`` 一起出现。
-
-	Agent 只能依据 ``replay_safe`` 判断写操作能否重试；只写 ``outcome`` 时
-	``envelope_error`` 无法补出 ``outcome_unknown``，调用方会误以为可以重试。
-	"""
-	source_root = Path(__file__).resolve().parents[1] / "src" / "boss_agent_cli"
-	checked = 0
-	failures: list[str] = []
-	for path in sorted(source_root.rglob("*.py")):
-		tree = ast.parse(path.read_text(encoding="utf-8"))
-		for node in ast.walk(tree):
-			if not isinstance(node, ast.Dict):
-				continue
-			entries = {
-				key.value: value.value
-				for key, value in zip(node.keys, node.values)
-				if isinstance(key, ast.Constant) and isinstance(key.value, str) and isinstance(value, ast.Constant)
-			}
-			if entries.get("outcome") != "unknown":
-				continue
-			checked += 1
-			if "replay_safe" not in entries:
-				failures.append(f"{path.relative_to(source_root.parents[1])}:{node.lineno}")
-	assert checked >= 1, "没有找到 outcome=unknown 的 details 字面量，AST 扫描可能失效"
-	assert failures == [], f"这些位置缺少 replay_safe：{failures}"
-
-
-def test_unregistered_unknown_result_codes_still_declare_replay_safety():
-	"""登记表里「结果未确认」的码，信封必须自带 ``replay_safe: false``。
-
-	招聘者侧 ``GREET_RESULT_UNKNOWN`` / ``LOCATION_RESULT_UNKNOWN`` /
-	``RESUME_ACCEPT_RESULT_UNKNOWN`` 的 details 原先只有 ``sent: null`` /
-	``accepted: null``，与文档承诺的「未知结果都带 replay_safe」不一致（Issue #988）。
-	``LOCAL_STATE_WRITE_FAILED`` 的平台结果已确认，只缺 ``replay_safe``，不能
-	被顺手标成 ``outcome_unknown``。
-	"""
-	unknown_codes = [
-		"ACTION_UNCONFIRMED",
-		"RESUME_ACCEPT_RESULT_UNKNOWN",
-		"GREET_RESULT_UNKNOWN",
-		"LOCATION_RESULT_UNKNOWN",
-	]
-	for code in unknown_codes:
-		assert ERROR_CODES[code].get("replay_safe") is False, code
-		assert ERROR_CODES[code].get("outcome_unknown") is True, code
-		payload = json.loads(
-			envelope_error("hr", code=code, message="未确认", details={"friend_id": 1})
-		)
-		details = payload["error"]["details"]
-		assert details["replay_safe"] is False, code
-		assert details["outcome_unknown"] is True, code
-		assert details["friend_id"] == 1, code
-
-	assert ERROR_CODES["LOCAL_STATE_WRITE_FAILED"].get("replay_safe") is False
-	payload = json.loads(
-		envelope_error(
-			"recruiter-location",
-			code="LOCAL_STATE_WRITE_FAILED",
-			message="已发送，但本地记录保存失败",
-			details={"friend_id": 1, "sent": True},
-		)
-	)
-	details = payload["error"]["details"]
-	assert details["replay_safe"] is False
-	assert details["sent"] is True
-	assert "outcome_unknown" not in details
-
-
-def test_caller_supplied_replay_safe_wins_over_registry():
-	"""调用方掌握更精确的判定时，登记表的 ``replay_safe: false`` 不能覆盖它。"""
-	payload = json.loads(
-		envelope_error(
-			"hr",
-			code="ACTION_UNCONFIRMED",
-			message="读取被中断",
-			details={"replay_safe": True, "outcome_unknown": False},
-		)
-	)
-	details = payload["error"]["details"]
-	assert details["replay_safe"] is True
-	assert details["outcome_unknown"] is False

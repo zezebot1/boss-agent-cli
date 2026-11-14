@@ -13,7 +13,7 @@ from boss_agent_cli.auth.browser import (
 )
 from boss_agent_cli.auth.cookie_extract import extract_cookies
 from boss_agent_cli.auth.curl_import import parse_curl_auth
-from boss_agent_cli.auth.identity import account_fingerprint
+from boss_agent_cli.auth.qr_login import qr_login_httpx
 from boss_agent_cli.auth.token_store import TokenStore
 from boss_agent_cli.output import Logger
 
@@ -116,10 +116,7 @@ class AuthManager:
 		check_request_control()
 
 	def _login_action(self) -> str:
-		# 异常文本会作为 error.message 出现在信封里，同样要指回本次登录态所在目录。
-		from boss_agent_cli.display import boss_command
-
-		return boss_command("login", platform_name=self._platform, data_dir=self._data_dir)
+		return "boss login" if self._platform == "zhipin" else f"boss --platform {self._platform} login"
 
 	def get_token(self) -> dict[str, Any]:
 		if self._token is not None:
@@ -128,23 +125,6 @@ class AuthManager:
 		if self._token is None:
 			raise AuthRequired(f"未登录，请先执行 {self._login_action()}")
 		return self._token
-
-	def account_fingerprint(self) -> str:
-		"""当前登录态的账号指纹（``wt2`` 的 SHA-256 前 16 位）；未登录或缺少主 Cookie 时返回空串。
-
-		本地操作记录（打招呼、投递）用它与稳定职位 ID 一起做去重，避免把另一个
-		账号的操作算到当前账号头上。同一账号的 ``wt2`` 稳定，重新登录若换发新值，
-		旧记录只会少命中一次，不会误拦。
-		"""
-		try:
-			token = self.get_token()
-		except AuthRequired:
-			return ""
-		cookies = token.get("cookies") if isinstance(token, dict) else None
-		if not isinstance(cookies, dict):
-			return ""
-		value = cookies.get("wt2")
-		return account_fingerprint(str(value)) if value else ""
 
 	def login(
 		self,
@@ -211,9 +191,24 @@ class AuthManager:
 			except Exception as e:
 				self._logger.info(f"CDP 登录失败（{e}），降级到 patchright")
 		else:
-			self._logger.info("CDP 不可用，改用浏览器扫码登录")
+			self._logger.info("CDP 不可用，尝试 QR 纯 httpx 登录")
 
-		# 第三步：patchright 扫码（兜底）
+		# 第三步：QR 纯 httpx 登录（仅 zhipin）
+		if self._platform == "zhipin":
+			try:
+				self._logger.info("尝试 QR 纯 httpx 登录...")
+				token = qr_login_httpx(timeout=timeout)
+				method = "QR httpx 登录"
+				self._store.save(token)
+				self._token = token
+				return {**token, "_method": method}
+			except PlatformRiskError as error:
+				self._record_cdp_risk_lock(cdp_url, error=error)
+				raise
+			except Exception as e:
+				self._logger.info(f"QR httpx 登录失败（{e}），降级到 patchright")
+
+		# 第四步：patchright 扫码（兜底）
 		try:
 			token = login_via_browser(timeout=timeout, platform=self._platform)
 		except PlatformRiskError as error:

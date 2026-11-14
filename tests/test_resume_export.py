@@ -169,17 +169,6 @@ def test_cli_export_html(tmp_path):
 	assert out_file.exists()
 
 
-def test_cli_export_html_expands_tilde_in_output_path(tmp_path, monkeypatch):
-	"""`~` 不经 shell 时（MCP 子进程、引号包裹）也必须展开到用户目录。"""
-	monkeypatch.setenv("HOME", str(tmp_path))
-	monkeypatch.setenv("USERPROFILE", str(tmp_path))
-	runner = CliRunner()
-	_invoke(runner, tmp_path, ["init", "--name", "tildetest", "--template", "default"])
-	result = _invoke(runner, tmp_path, ["export", "tildetest", "--format", "html", "-o", "~/out/resume.html"])
-	assert result.exit_code == 0
-	assert (tmp_path / "out" / "resume.html").exists()
-
-
 def test_cli_export_html_default_path(tmp_path, monkeypatch):
 	"""When no -o is given, export defaults to <name>.html (in cwd, isolated here)."""
 	monkeypatch.chdir(tmp_path)
@@ -210,107 +199,6 @@ def test_cli_export_pdf_chromium_unavailable(tmp_path):
 	parsed = json.loads(result.output)
 	assert parsed["ok"] is False
 	assert parsed["error"]["code"] == "EXPORT_FAILED"
-	# 导出用 patchright 渲染，恢复指引必须指向 patchright 而不是 playwright，
-	# 且命令要能在 `uv tool install` 环境里执行（走运行本 CLI 的解释器）。
-	from boss_agent_cli.services.browser_runtime import patchright_install_command
-
-	action = parsed["error"]["recovery_action"]
-	assert patchright_install_command() in action
-	assert "playwright install" not in action
-
-
-def test_cli_export_pdf_kernel_missing_is_not_export_failed(tmp_path):
-	"""PDF 导出命中 patchright 内核缺失时按 BROWSER_KERNEL_MISSING 上报。
-
-	``EXPORT_FAILED`` 是「导出器出错、可以再试一次」的语义；内核缺失是确定性
-	失败，重试同一条命令永远同一结果。而且 patchright 的异常文本里带整段安装
-	横幅和本机绝对路径，不能塞进 error.message。
-	"""
-	runner = CliRunner()
-	_invoke(runner, tmp_path, ["init", "--name", "pdfkernel", "--template", "default"])
-
-	with patch(
-		"patchright.sync_api.sync_playwright",
-		side_effect=Exception(
-			"BrowserType.launch: Executable doesn't exist at /x/chromium-1/chrome-headless-shell"
-		),
-	):
-		result = _invoke(runner, tmp_path, ["export", "pdfkernel", "--format", "pdf"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "BROWSER_KERNEL_MISSING"
-	assert parsed["error"]["recoverable"] is True
-	from boss_agent_cli.services.browser_runtime import patchright_install_command
-
-	install = patchright_install_command()
-	assert parsed["error"]["recovery_action"] == install
-	assert parsed["hints"]["next_actions"][0] == install
-	# doctor 必须指向本次 --data-dir，否则自定义目录下诊断的是另一份数据。
-	assert str(tmp_path.resolve()) in parsed["hints"]["next_actions"][1]
-	assert "chrome-headless-shell" not in parsed["error"]["message"]
-
-
-def test_cli_export_html_to_directory_is_local_io_not_export_failed(tmp_path):
-	"""HTML 导出写到目录时是路径问题，不能给「装浏览器内核」的指引。
-
-	HTML 导出只用本地模板渲染，完全不碰 patchright；此前所有异常都归成
-	``EXPORT_FAILED`` +「检查 patchright 安装」，把用户引向一个无关的方向。
-	"""
-	runner = CliRunner()
-	_invoke(runner, tmp_path, ["init", "--name", "htmldir", "--template", "default"])
-
-	result = _invoke(runner, tmp_path, ["export", "htmldir", "--format", "html", "-o", str(tmp_path)])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "LOCAL_IO_ERROR"
-	assert parsed["error"]["recoverable"] is False
-	assert "patchright" not in parsed["error"]["recovery_action"]
-	assert parsed["hints"]["operator_actions"]
-
-
-def test_cli_export_html_render_failure_guidance_is_not_about_browsers(tmp_path):
-	"""HTML 渲染失败不能用 patchright 文案：该格式从不启动浏览器（Issue #1031）。
-
-	Issue #1009 把内核缺失与本地 IO 分流后，通用渲染失败仍直接复用错误码
-	登记表里拆分前的恢复文案，用户会被告知去装一个与 HTML 导出无关的内核。
-	"""
-	runner = CliRunner()
-	_invoke(runner, tmp_path, ["init", "--name", "htmlrender", "--template", "default"])
-
-	with patch("boss_agent_cli.resume.export.export_html", side_effect=RuntimeError("template render exploded")):
-		result = _invoke(runner, tmp_path, ["export", "htmlrender", "--format", "html"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "EXPORT_FAILED"
-	assert "patchright" not in parsed["error"]["recovery_action"]
-	assert "不使用浏览器内核" in parsed["error"]["recovery_action"]
-	assert "template render exploded" in parsed["error"]["message"]
-
-
-def test_cli_export_json_output_path_prepare_failure_is_enveloped(tmp_path):
-	"""建父目录就失败（目标父路径是普通文件）时也要给 LOCAL_IO_ERROR 信封。
-
-	``resume_cmd`` 没有统一异常装饰器：``prepare_output_path`` 在 try 之外抛
-	OSError 时会落进顶层网兜，被报成「resume 本地文件读写失败」而不是导出失败。
-	"""
-	runner = CliRunner()
-	_invoke(runner, tmp_path, ["init", "--name", "jsondir", "--template", "default"])
-	blocker = tmp_path / "blocker"
-	blocker.write_text("not a directory", encoding="utf-8")
-
-	result = _invoke(
-		runner,
-		tmp_path,
-		["export", "jsondir", "--format", "json", "-o", str(blocker / "x.json")],
-	)
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "LOCAL_IO_ERROR"
-	assert parsed["error"]["recoverable"] is False
 
 
 def test_cli_export_not_found(tmp_path):
@@ -320,23 +208,3 @@ def test_cli_export_not_found(tmp_path):
 	assert result.exit_code == 1
 	parsed = json.loads(result.output)
 	assert parsed["error"]["code"] == "RESUME_NOT_FOUND"
-
-
-def test_cli_export_json_corrupt_resume_reports_file_invalid(tmp_path):
-	"""文件在但读不出来时不能报成 LOCAL_IO_ERROR：磁盘/权限指引会把人带偏。
-
-	`store.export_json` 内部的 `get()` 返回 None 后抛 `FileNotFoundError`，
-	顶层 OSError 网兜会把它说成「本地文件读写失败」。文件确实存在，也不能报成
-	RESUME_NOT_FOUND：`resume list` 会隐藏坏文件，照提示只会空转。现在统一报
-	RESUME_FILE_INVALID，并给出修复 / 删除路径。
-	"""
-	resumes = tmp_path / "resumes"
-	resumes.mkdir(parents=True)
-	(resumes / "broken.json").write_text("{", encoding="utf-8")
-
-	runner = CliRunner()
-	result = _invoke(runner, tmp_path, ["export", "broken", "--format", "json"])
-
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "RESUME_FILE_INVALID"

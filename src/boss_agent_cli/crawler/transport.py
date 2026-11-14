@@ -18,10 +18,7 @@ from boss_agent_cli.api.request_budget import (
 	is_request_stop,
 	retry_after_seconds,
 )
-from boss_agent_cli.crawler.controls import CrawlRuntimeUnavailable
 from boss_agent_cli.crawler.hooks import HookInjection, HookRegistrationError, inject_hook_profile
-from boss_agent_cli.display import risk_error_message
-from boss_agent_cli.services.install_extras import EXTRA_MODULES, extras_requirement, module_available
 
 # 兼容 search / pc 等变体；监听只作主路径，失败时退到页面内同源请求（不走 httpx）。
 JOBLIST_TARGET = r"wapi/zpgeek/[^?\s]*joblist\.json"
@@ -79,8 +76,7 @@ class CrawlRiskError(RuntimeError):
 		reason = "ENVIRONMENT_RISK" if classification_code in (31, 37) else "ACCOUNT_RISK"
 		cause = "身份资料流程" if code == 38 else "风险流程"
 		hint = "当前采集已停止并保存断点；请在官方目标业务页确认恢复后，由用户执行 boss clean --risk-lock 再显式继续。"
-		# 平台 message 可能带临时凭据，不进入异常文本与运行结果。
-		message = risk_error_message(reason)
+		message = "访问环境受限" if code == 31 else "账号访问受限" if code == 32 else str(payload.get("message") or "")
 		return cls(f"平台返回{cause} code={code}: {message}。{hint}", reason=reason, platform_code=code)
 
 
@@ -89,22 +85,6 @@ class CrawlTransport(Protocol):
 	def fetch_page(self, query: str, city_code: str, page_no: int) -> dict[str, Any]: ...
 	def fetch_detail(self, security_id: str) -> dict[str, Any]: ...
 	def close(self) -> None: ...
-
-
-# 采集浏览器与 XLSX 导出各自依赖的可选包，都在 `crawl` 依赖组里。
-_CRAWL_RUNTIME_MODULES = EXTRA_MODULES["crawl"]
-
-
-def ensure_crawl_runtime() -> None:
-	"""入口在创建任务、启动后台进程、打开浏览器之前确认 `crawl` 可选依赖已安装。
-
-	默认安装不带这组依赖。等到打开浏览器才发现时任务已经建好，执行器只能把它
-	记成 `stopped`，调用方拿到的是成功信封和恢复指引，照做只会重复同一个失败
-	（Issue #1050）。这里只探测模块是否可导入，不导入它们。
-	"""
-	missing = [name for name in _CRAWL_RUNTIME_MODULES if not module_available(name)]
-	if missing:
-		raise CrawlRuntimeUnavailable(f"crawl 需要 {'、'.join(missing)}；请安装 {extras_requirement('crawl')}")
 
 
 class DrissionCrawlerSession:
@@ -131,10 +111,7 @@ class DrissionCrawlerSession:
 		self._seed_cookies = dict(seed_cookies or {})
 		self._user_agent = user_agent or ""
 		self._page: Any = None
-		# 页签可见列表当前停在第几页；None 表示本会话尚未导航或位置已不可信。
-		# 断点恢复会带着 next_page>1 进入，必须据此先把页签对齐到目标页
-		# （Issue #897）。
-		self._page_no: int | None = None
+		self._started = False
 		self._attempt_callback: Callable[[str], ContextManager[None]] | None = None
 		self._cooldown_callback: Callable[[float], None] | None = None
 
@@ -163,7 +140,7 @@ class DrissionCrawlerSession:
 		try:
 			from DrissionPage import ChromiumOptions, ChromiumPage
 		except ImportError as exc:
-			raise CrawlRuntimeUnavailable("crawl 需要 DrissionPage；请安装 boss-agent-cli[crawl]") from exc
+			raise RuntimeError("crawl 需要 DrissionPage；请安装 boss-agent-cli[crawl]") from exc
 		options = ChromiumOptions()
 		self._profile_path = self._profile_path.resolve()
 		self._profile_path.mkdir(parents=True, exist_ok=True)
@@ -228,33 +205,16 @@ class DrissionCrawlerSession:
 		if self._page is None:
 			raise RuntimeError("Drission crawler session is not open")
 		self._raise_if_platform_risk_page()
-		target_page = max(1, int(page_no))
 		# 每次拉列表前重置监听，避免附着旧窗口时吃到过期/错误响应包。
 		self._start_joblist_listener()
 		listen_error: Exception | None = None
-		# 监听器拿到的是页签里「可见列表」发出的 joblist 请求，不保证就是本次
-		# 请求的页码。断点恢复从 next_page>1 开始时，新页签（或保留的旧窗口）
-		# 仍停在第 1 页；不先对齐就会把第 1 页响应记成断点页，并重复消耗
-		# 请求预算（Issue #897）。同一页重试也要重新导航：上一次的页位置
-		# 不能当作这一次已经请求过。
-		navigating = self._page_no is None or target_page <= self._page_no
 		try:
-			with self._attempt("list-navigation" if navigating else "list-pagination"):
-				try:
-					position = self._page_no
-					if position is None or target_page <= position:
-						self._page.get(
-							f"https://www.zhipin.com/web/geek/jobs?city={city_code}&query={quote(query)}"
-						)
-						position = 1
-					while position < target_page:
-						self._trigger_next_page()
-						position += 1
-				except BaseException:
-					# 导航/滚动可能已让页签前进但没有完成：位置不可信，下次重新导航。
-					self._page_no = None
-					raise
-				self._page_no = position
+			with self._attempt("list-pagination" if self._started else "list-navigation"):
+				if self._started:
+					self._trigger_next_page()
+				else:
+					self._page.get(f"https://www.zhipin.com/web/geek/jobs?city={city_code}&query={quote(query)}")
+					self._started = True
 				self._raise_if_security_page()
 				packet = self._page.listen.wait(timeout=self._timeout, raise_err=False)
 				if packet is not None:
@@ -319,8 +279,6 @@ class DrissionCrawlerSession:
 		if "zhipin.com" not in url:
 			with self._attempt("list-navigation"):
 				self._page.get(f"https://www.zhipin.com/web/geek/jobs?city={city_code}&query={quote(query)}")
-			# 导航回到列表第 1 页；显式页码请求不依赖可见页，但后续监听路径要知道位置。
-			self._page_no = 1
 		return self._fetch_json_in_page(
 			JOBLIST_PATH,
 			{"query": str(query or ""), "city": str(city_code or ""), "page": str(page_no or 1)},

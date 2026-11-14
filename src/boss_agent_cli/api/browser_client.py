@@ -15,10 +15,9 @@ import sys
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Mapping, cast
+from typing import Any, Callable, cast
 from patchright.sync_api import sync_playwright
 
-from boss_agent_cli.config import DEFAULT_REQUEST_DELAY
 from boss_agent_cli.api import endpoints
 from boss_agent_cli.api.browser_source import (
 	CHANNEL_CDP,
@@ -27,10 +26,8 @@ from boss_agent_cli.api.browser_source import (
 	BrowserSourceUnavailable,
 	resolve_policy,
 )
-from boss_agent_cli.api.proxy import WEBRTC_LEAK_GUARD_ARGS, resolve_proxy
 from boss_agent_cli.api.browser_urls import DEFAULT_CDP_URL, is_zhipin_url
 from boss_agent_cli.api.endpoints_loader import EndpointSpec, endpoint_for_request
-from boss_agent_cli.api.httpx_helpers import new_trace_id
 from boss_agent_cli.api.throttle import RequestThrottle
 from boss_agent_cli.api.request_budget import RequestBudget, check_request_control, is_request_stop, retry_after_seconds
 from boss_agent_cli.api.zhipin_errors import platform_risk_page_response, raise_platform_risk_response
@@ -46,48 +43,6 @@ def _find_reusable_zhipin_page(context: Any) -> Any | None:
 		if is_zhipin_url(getattr(page, "url", "")):
 			return page
 	return None
-
-
-class BrowserNavigationError(RuntimeError):
-	"""首页在有界重试后仍未进入 domcontentloaded。
-
-	用户可见文案不转发 Playwright 的 ``Page.goto`` 调用日志。``details()`` 只保留
-	公开 URL、次数、通道和原因的第一行，供信封诊断。
-	"""
-
-	code = "BROWSER_NAV_TIMEOUT"
-
-	def __init__(
-		self,
-		url: str,
-		*,
-		attempts: int,
-		timeout_ms: int,
-		channel: str,
-		cause: BaseException | None = None,
-	) -> None:
-		self.url = url
-		self.attempts = attempts
-		self.timeout_ms = timeout_ms
-		self.channel = channel
-		self.cause = cause
-		super().__init__(
-			f"浏览器首页导航超时：连续 {attempts} 次均未在 {timeout_ms}ms 内到达 domcontentloaded（{url}）"
-		)
-
-	def details(self) -> dict[str, Any]:
-		cause_text = ""
-		if self.cause is not None:
-			cause_text = str(self.cause).splitlines()[0][:240]
-		payload: dict[str, Any] = {
-			"url": self.url,
-			"attempts": self.attempts,
-			"timeout_ms": self.timeout_ms,
-			"channel": self.channel,
-		}
-		if cause_text:
-			payload["cause"] = cause_text
-		return payload
 
 
 class RecruiterChatTabRequired(RuntimeError):
@@ -109,26 +64,10 @@ class RecruiterChatTabRequired(RuntimeError):
 _CDP_PROBE_TIMEOUT = 3  # 显式 --cdp-url 的 CDP 探测 HTTP 超时（秒）
 _CDP_AUTO_PROBE_TIMEOUT = 1  # 默认自动探测 localhost:9222 的超时（无调试端口时快速失败，省 ~2s）
 _NAV_TIMEOUT_MS = 15000  # 页面导航超时（毫秒）
-# 含首次。与 auth.browser._HOME_NAV_RETRIES 对齐：首页在自动化下偶发卡住，
-# 跳 about:blank 重置卡死导航后再试一次（Discussion #250）。
-_HOME_NAV_RETRIES = 2
 # zhipin 首页常驻请求多、headless 下基本进不了 networkidle；domcontentloaded 后 JS
 # 环境即可发 fetch，故宽限缩到 0.8s（实测每次都会耗满，缩短直接省 ~2s/搜索）。
 _HEADLESS_NETWORKIDLE_GRACE_MS = 800
 _REQUEST_TIMEOUT_MS = 20000
-# zhipin 的主登录态 cookie：同一账号值稳定、不同账号不同，用于判定复用到的浏览器
-# 属于哪个账号（与 auth/login 的「账号指纹」同源）。
-_PRIMARY_COOKIE = "wt2"
-_PRIMARY_COOKIE_DOMAIN = ".zhipin.com"
-
-
-def _cookie_domain_matches(cookie_domain: str, expected: str) -> bool:
-	"""cookie domain 是否落在 expected 上（忽略前导点与大小写）。"""
-	left = (cookie_domain or "").lstrip(".").lower()
-	right = (expected or "").lstrip(".").lower()
-	if not left or not right:
-		return False
-	return left == right or left.endswith("." + right)
 _EVALUATE_TIMEOUT_MS = 30000
 
 # macOS / Linux / Windows Chrome user data 默认路径
@@ -141,7 +80,7 @@ _CHROME_USER_DATA_CANDIDATES = [
 
 #: Runtime.evaluate(fetch) 的 JS 主体，request() 首次与只读恢复共用同一份。
 _FETCH_SCRIPT = r"""
-			async ({method, url, params, data, referer, timeoutMs, identity, traceId}) => {
+			async ({method, url, params, data, referer, timeoutMs}) => {
 				const controller = new AbortController();
 				let timer;
 				const deadline = new Promise((_, reject) => {
@@ -165,12 +104,11 @@ _FETCH_SCRIPT = r"""
 						method: method,
 						signal: controller.signal,
 						credentials: 'include',
-						headers: Object.assign({
+						headers: {
 							'Accept': 'application/json, text/plain, */*',
 							'Referer': referer,
 							'X-Requested-With': 'XMLHttpRequest',
-							'traceid': traceId,
-						}, identity || {}),
+						},
 					};
 
 					if (method === 'POST' && data) {
@@ -207,7 +145,6 @@ _FETCH_SCRIPT = r"""
 						const contentType = resp.headers.get('Content-Type') || '';
 						const isHtml = /html/i.test(contentType) || /^\s*(?:<!doctype html|<html)/i.test(body);
 						return {code: -1, message: 'browser response is not JSON', zpData: {},
-							__cli_unparsed_response__: true,
 							__cli_security_response__: {url: resp.url, content_type: isHtml ? 'text/html' : contentType, title, restricted}};
 					}
 					})()]);
@@ -245,13 +182,12 @@ class BrowserSession:
 		cookies: dict[str, Any],
 		user_agent: str,
 		*,
-		delay: tuple[float, float] = DEFAULT_REQUEST_DELAY,
+		delay: tuple[float, float] = (1.5, 3.0),
 		cdp_url: str | None = None,
 		logger: Any = None,
 		browser_source: str | None = None,
 		request_budget: RequestBudget | None = None,
 		request_check: Callable[[], None] | None = None,
-		identity: Mapping[str, str] | None = None,
 	) -> None:
 		self._request_budget = request_budget
 		self._request_check = request_check
@@ -263,7 +199,6 @@ class BrowserSession:
 		self._page: Any = None
 		self._cookies = cookies
 		self._user_agent = user_agent
-		self._identity = dict(identity or {})
 		self._started = False
 		self._cdp_url = cdp_url
 		self._is_cdp = False
@@ -273,7 +208,6 @@ class BrowserSession:
 		# 页面已就绪（默认 True）；仅 _try_connect 新建页签 goto 超时才置 False，
 		# request() 据此在 evaluate(fetch) 前做有界恢复，避免对仍在导航的页面挂起。
 		self._page_ready = True
-		self._home_nav_error: BrowserNavigationError | None = None
 		self._logger = logger
 		# 通道来源策略 —— 本类上**唯一**的来源/模式选择器。
 		# 禁止再加第二个模式布尔：那正是 #404 与 #388 各插一个短路、
@@ -333,61 +267,19 @@ class BrowserSession:
 					raise_platform_risk_response(result, is_cdp=self._is_cdp)
 				if result.pop("__cli_request_interrupted__", False):
 					return self._interrupted_request_response(endpoint)
-				if result.pop("__cli_unparsed_response__", False):
-					return self._unparsed_response(endpoint)
 			return result
 
-	def _navigate_home(self, *, channel: str | None = None) -> None:
-		"""打开首页并确认 domcontentloaded。
-
-		单次 ``goto`` 在 headless / 新建 CDP 页签上会把偶发的首页卡死直接变成
-		``Page.goto`` 超时（Discussion #250）。这里与登录预热一致：失败后先确认
-		不是安全页，再跳 ``about:blank`` 重置导航并重试，全部失败才抛
-		``BrowserNavigationError``。重试留在同一次 browser-navigation 预算窗口里。
-		"""
+	def _navigate_home(self) -> None:
 		from contextlib import nullcontext
 
-		resolved_channel = channel or ("cdp" if self._is_cdp else "headless")
 		budget = getattr(self, "_request_budget", None)
 		window = (
 			budget.attempt("browser-navigation", check=self._check_request) if budget is not None else nullcontext()
 		)
-		last_error: BaseException | None = None
 		with window:
 			check_request_control(self._check_request)
-			for attempt in range(_HOME_NAV_RETRIES):
-				try:
-					self._page.goto(HOME_URL, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS)
-					self._raise_if_security_page()
-					self._home_nav_error = None
-					return
-				except Exception as error:
-					if is_request_stop(error):
-						raise
-					# 超时后页面可能已经停在安全验证页；先抛风险，不要 about:blank 把验证页清掉。
-					self._raise_if_security_page()
-					last_error = error
-					self._log(
-						f"[boss] 首页导航未在预期时间完成（{resolved_channel}，"
-						f"{attempt + 1}/{_HOME_NAV_RETRIES}）：{error}"
-					)
-					if attempt + 1 >= _HOME_NAV_RETRIES:
-						break
-					try:
-						self._page.goto("about:blank", wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS)
-					except Exception as reset_error:
-						if is_request_stop(reset_error):
-							raise
-						self._raise_if_security_page()
-			if last_error is None:
-				last_error = RuntimeError("homepage navigation failed")
-			raise BrowserNavigationError(
-				HOME_URL,
-				attempts=_HOME_NAV_RETRIES,
-				timeout_ms=_NAV_TIMEOUT_MS,
-				channel=resolved_channel,
-				cause=last_error,
-			) from last_error
+			self._page.goto(HOME_URL, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS)
+			self._raise_if_security_page()
 
 	def _log(self, message: str) -> None:
 		"""Diagnostic channel logs: debug by default so TTY wizard stays clean."""
@@ -498,46 +390,6 @@ class BrowserSession:
 					return True
 		return False
 
-	def _reused_context_matches_stored_account(self) -> bool:
-		"""探测到的浏览器是否属于本地保存的那个账号。
-
-		``auto`` 会自动探测 ``localhost:9222``，而 9222 上监听的可能是任何一个
-		Chromium：别的 Electron 应用、用户隔离出来的另一个 profile，甚至**同一个
-		项目的另一个账号**。复用这种 context 意味着拿着招聘者会话去执行候选者的
-		请求，平台侧看到的是账号与调用意图错位（实测会得到 code 37）。
-
-		只在本地确实存有凭据时校验；``existing-browser`` 这类不读本地凭据的来源没有
-		可比对象，保持原样复用。校验失败返回 False，让调用方落到下一个通道（用本地
-		凭据自己起浏览器），而不是把别人的会话据为己有。
-		"""
-		primary = self._cookies.get(_PRIMARY_COOKIE, "")
-		if not primary:
-			return True
-		context_value = self._context_cookie_value(_PRIMARY_COOKIE)
-		if not context_value:
-			# 该 context 未登录：没有可冲突的账号身份，保持既有复用行为。
-			return True
-		if context_value == primary:
-			return True
-		self._log(
-			"[boss] 探测到的浏览器登录的是另一个账号，拒绝复用其会话；"
-			"改用本地凭据自建浏览器"
-		)
-		return False
-
-	def _context_cookie_value(self, name: str) -> str:
-		"""读取当前 context 中某个 cookie 的值；读不到返回空串。"""
-		try:
-			target = _PRIMARY_COOKIE_DOMAIN
-			for cookie in self._context.cookies():
-				if cookie.get("name") != name:
-					continue
-				if _cookie_domain_matches(cookie.get("domain", ""), target):
-					return str(cookie.get("value") or "")
-		except Exception as exc:  # pragma: no cover - 取决于实时 CDP 状态
-			self._log(f"[boss] 读取复用 context 的 cookie 失败：{type(exc).__name__}")
-		return ""
-
 	def _try_connect(self, url: str, *, explicit: bool = True) -> bool:
 		"""Attempt a single CDP connection, reusing user's existing context.
 
@@ -548,7 +400,6 @@ class BrowserSession:
 		# 每次连接尝试都重置就绪标志：复用页签分支不碰 _page_ready，若上一次尝试
 		# 在新建页签 goto 超时留下 False，会污染本次复用的健康页签（review Finding）。
 		self._page_ready = True
-		self._home_nav_error = None
 		try:
 			self._browser = self._pw.chromium.connect_over_cdp(url)
 			contexts = self._browser.contexts
@@ -557,9 +408,6 @@ class BrowserSession:
 				# 复用用户现有 context（保留登录态，避免额外浏览器状态）
 				self._context = contexts[0]
 				self._own_context = False  # 非我们创建，close 时不关闭
-				if not self._reused_context_matches_stored_account():
-					self._close_browser_quietly()
-					return False
 				# 优先复用用户已打开的 zhipin 页签：避免每次高风险 op 都新开空白页 +
 				# 导航到 BOSS 首页（issue #334：用户观感是"反复自动新开/刷新页面"），
 				# 同时降低自动化足迹。请求只需 page 处于 zhipin 同源即可携带 cookie。
@@ -575,7 +423,7 @@ class BrowserSession:
 				return False
 			else:
 				# 没有已存在 context，创建新的并注入 cookies
-				self._context = self._browser.new_context(proxy=resolve_proxy())
+				self._context = self._browser.new_context()
 				if self._cookies:
 					self._context.add_cookies(
 						[
@@ -604,13 +452,13 @@ class BrowserSession:
 				# CDP 模式下用较长超时 + DOM 就绪等待（commit 级返回后立即
 				# evaluate 会撞上 execution context destroyed）
 				try:
-					self._navigate_home(channel="cdp")
-				except BrowserNavigationError as error:
-					# 有界重试后仍未就绪：保留 CDP 会话，request() 再等一次 load，
-					# 仍失败则抛出同一错误，而不是降级到另一个浏览器会话。
-					# 风控异常不在这里捕获，交给外层按 request stop 原样上抛。
+					self._navigate_home()
+				except Exception as error:
+					if is_request_stop(error):
+						raise
+					# 导航超时：页面可能仍在导航、执行上下文未建立。标记未就绪，
+					# 由 request() 在 evaluate 前有界恢复，避免永久挂起（同 #390）。
 					self._page_ready = False
-					self._home_nav_error = error
 					page_label = "新建 page（首页未就绪）"
 				else:
 					page_label = "新建 page"
@@ -670,17 +518,12 @@ class BrowserSession:
 
 	def _start_headless(self) -> None:
 		"""Fallback: launch headless patchright Chromium."""
-		self._browser = self._pw.chromium.launch(
-			headless=True,
-			proxy=resolve_proxy(),
-			args=list(WEBRTC_LEAK_GUARD_ARGS),
-		)
+		self._browser = self._pw.chromium.launch(headless=True)
 		self._context = self._browser.new_context(
 			user_agent=self._user_agent,
 			viewport={"width": 1280, "height": 800},
 			locale="zh-CN",
 			timezone_id="Asia/Shanghai",
-			proxy=resolve_proxy(),
 		)
 		self._own_context = True
 		self._own_page = True
@@ -691,7 +534,7 @@ class BrowserSession:
 			]
 		)
 		self._page = self._context.new_page()
-		self._navigate_home(channel="headless")
+		self._navigate_home()
 		try:
 			self._page.wait_for_load_state("networkidle", timeout=_HEADLESS_NETWORKIDLE_GRACE_MS)
 		except Exception as e:
@@ -746,23 +589,14 @@ class BrowserSession:
 		if not self._page_ready:
 			try:
 				self._page.wait_for_load_state("domcontentloaded", timeout=_NAV_TIMEOUT_MS)
-			except Exception as error:
-				if is_request_stop(error):
-					raise
-				self._raise_if_security_page()
-				pending = self._home_nav_error
-				if pending is not None:
-					raise pending
-				raise BrowserNavigationError(
-					HOME_URL,
-					attempts=1,
-					timeout_ms=_NAV_TIMEOUT_MS,
-					channel="cdp" if self._is_cdp else "headless",
-					cause=error,
-				) from error
+			except Exception:
+				return {
+					"code": -1,
+					"message": "页面导航未完成（CDP 首页加载超时），无法发起请求；请检查浏览器后重试",
+					"zpData": {},
+				}
 			else:
 				self._page_ready = True
-				self._home_nav_error = None
 				self._raise_if_security_page()
 		payload = {
 			"method": method.upper(),
@@ -771,11 +605,6 @@ class BrowserSession:
 			"data": data,
 			"referer": referer,
 			"timeoutMs": _REQUEST_TIMEOUT_MS,
-			# 页面自己给业务 XHR 加的 token/zp_token；缺了它浏览器通道就和 httpx 通道
-			# 不是同一个客户端（见 docs/research/zhipin-request-identity-2026-10-29.md）。
-			"identity": dict(self._identity),
-			# 页面每个请求换一个 traceid；浏览器通道同样按请求生成。
-			"traceId": new_trace_id(),
 		}
 		try:
 			result = self._send_fetch(payload, endpoint)
@@ -856,13 +685,6 @@ class BrowserSession:
 	def _interrupted_request_response(endpoint: EndpointSpec | None) -> dict[str, Any]:
 		write_possible = endpoint is None or endpoint.effect != "read"
 		code = "ACTION_UNCONFIRMED" if write_possible else "NETWORK_ERROR"
-		# 读取被中断时重试没有副作用，与文档的 replay_safe=true 契约一致；
-		# 写请求不知道是否已生效，保持 false。两处写成字面量，供结构门禁扫描。
-		details: dict[str, Any] = (
-			{"outcome": "unknown", "replay_safe": False}
-			if write_possible
-			else {"outcome": "unknown", "replay_safe": True}
-		)
 		return {
 			"code": -1,
 			"message": "请求期间页面或响应中断；操作可能已生效，请先核对结果，勿直接重试"
@@ -870,33 +692,7 @@ class BrowserSession:
 			else "浏览器读取请求中断或超时，请检查页面后恢复",
 			"zpData": {},
 			"__cli_error_code__": code,
-			"__cli_error_details__": details,
-		}
-
-	@staticmethod
-	def _unparsed_response(endpoint: EndpointSpec | None) -> dict[str, Any]:
-		"""响应正文不是 JSON：写请求无法证明动作没有发生。
-
-		httpx 通道在同样情形返回 ``ACTION_UNCONFIRMED``（``_unconfirmed_http_response``），
-		浏览器通道此前留下裸 ``code: -1``，平台层只能判 ``UNKNOWN``，写命令又把它
-		升级成可重试的 ``NETWORK_ERROR``——同一个「可能已生效」的写操作因此在
-		单次命令、批量循环和 wizard 里被重放（Issue #990）。
-		"""
-		write_possible = endpoint is None or endpoint.effect != "read"
-		if not write_possible:
-			return {
-				"code": -1,
-				"message": "浏览器读取响应不是 JSON，请检查页面后重试",
-				"zpData": {},
-				"__cli_error_code__": "NETWORK_ERROR",
-				"__cli_error_details__": {"outcome": "unknown", "replay_safe": True},
-			}
-		return {
-			"code": -1,
-			"message": "请求结果未确认：响应不是 JSON，操作可能已生效，请先核对平台记录，勿直接重试",
-			"zpData": {},
-			"__cli_error_code__": "ACTION_UNCONFIRMED",
-			"__cli_error_details__": {"outcome": "unknown", "replay_safe": False, "reason": "unparsed_response"},
+			"__cli_error_details__": {"outcome": "unknown", "replay_safe": False},
 		}
 
 	# ── Arbitrary JS evaluation (CDP-only, raw websocket) ────────────
@@ -1037,7 +833,11 @@ def _pick_chat_target_ws(cdp_http_url: str) -> str:
 		raise RuntimeError(f"cannot reach CDP at {list_url}: {exc}") from exc
 
 	for t in tabs:
-		if t.get("type") == "page" and is_zhipin_url(t.get("url", "")) and "/web/chat/index" in t.get("url", ""):
+		if (
+			t.get("type") == "page"
+			and is_zhipin_url(t.get("url", ""))
+			and ("/web/chat/index" in t.get("url", "") or "/web/geek/chat" in t.get("url", ""))
+		):
 			target_ws = t.get("webSocketDebuggerUrl")
 			if target_ws:
 				return cast("str", target_ws)

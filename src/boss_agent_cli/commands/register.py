@@ -29,6 +29,7 @@ from boss_agent_cli.commands import (
 	me,
 	pipeline,
 	platforms,
+	reply,
 	preset,
 	recommend,
 	resume_cmd,
@@ -47,13 +48,12 @@ from boss_agent_cli.commands.recruiter import download_resume as recruiter_downl
 from boss_agent_cli.commands.recruiter import candidates as recruiter_candidates
 from boss_agent_cli.commands.recruiter import chat as recruiter_chat
 from boss_agent_cli.commands.recruiter import jobs as recruiter_jobs
-from boss_agent_cli.commands.recruiter import location as recruiter_location
 from boss_agent_cli.commands.recruiter import reply as recruiter_reply
 from boss_agent_cli.commands.recruiter import request_resume as recruiter_request_resume
 from boss_agent_cli.commands.recruiter import recommendations as recruiter_recommendations
 from boss_agent_cli.commands.recruiter import resume as recruiter_resume
 from boss_agent_cli.commands.recruiter import whoami as recruiter_whoami
-from boss_agent_cli.display import handle_error_output, shell_argument
+from boss_agent_cli.display import handle_error_output
 from boss_agent_cli.platforms import list_recruiter_platforms
 
 
@@ -77,6 +77,7 @@ def register_candidate_commands(cli: click.Group) -> None:
 	cli.add_command(chat.chat_cmd, "chat")
 	cli.add_command(chatmsg.chatmsg_cmd, "chatmsg")
 	cli.add_command(chat_summary.chat_summary_cmd, "chat-summary")
+	cli.add_command(reply.reply_cmd, "reply")
 	cli.add_command(mark.mark_cmd, "mark")
 	cli.add_command(exchange.exchange_cmd, "exchange")
 	cli.add_command(interviews.interviews_cmd, "interviews")
@@ -108,12 +109,6 @@ def hr_group(ctx: click.Context) -> None:
 	recruiter_name = f"{platform_name}-recruiter"
 	supported = list_recruiter_platforms()
 	if recruiter_name not in supported:
-		# 当前平台不支持招聘者模式：恢复命令强制切回 zhipin，同时保留原数据目录。
-		data_dir = ctx.obj.get("data_dir")
-		recovery_action = "boss --platform zhipin"
-		if data_dir is not None:
-			recovery_action += f" --data-dir {shell_argument(str(data_dir.resolve()))}"
-		recovery_action += " hr ..."
 		handle_error_output(
 			ctx,
 			"hr",
@@ -123,7 +118,7 @@ def hr_group(ctx: click.Context) -> None:
 				f"当前仅支持: {', '.join(supported)}"
 			),
 			recoverable=True,
-			recovery_action=recovery_action,
+			recovery_action="boss --platform zhipin hr ...",
 		)
 		raise SystemExit(1)
 
@@ -145,4 +140,3 @@ def register_recruiter_commands(cli: click.Group) -> None:
 	hr_group.add_command(recruiter_download_resume.download_resume_cmd, "download-resume")
 	hr_group.add_command(recruiter_recommendations.recommendations_cmd, "recommendations")
 	hr_group.add_command(recruiter_recommendations.greet_cmd, "greet")
-	hr_group.add_command(recruiter_location.location_cmd, "location")

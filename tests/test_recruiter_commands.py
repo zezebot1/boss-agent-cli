@@ -1,24 +1,12 @@
 import json
-import shlex
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from click.testing import CliRunner
 
-from boss_agent_cli.display import risk_error_contract, risk_error_message
 from boss_agent_cli.main import cli
 from boss_agent_cli.platforms.zhipin_recruiter import BossRecruiterPlatform
 from boss_agent_cli.schema.error_codes import ERROR_CODES
 from boss_agent_cli.services.resume_parser import parse_resume
-
-
-_DEFAULT_DATA_DIR = (Path.home() / ".boss-agent").resolve()
-
-
-def _hint(command: str) -> str:
-	"""默认数据目录下的招聘者后继命令。"""
-	return f"boss --data-dir {_DEFAULT_DATA_DIR} {command}"
 
 
 def _ctx_mock(mock_cls):
@@ -35,23 +23,11 @@ def _invoke(*args):
 	return runner.invoke(cli, ["--role", "recruiter", *args])
 
 
-def _risk_recovery_for_default_dir(code: str) -> str:
-	"""风控停止契约的 recovery_action，解锁命令指向默认数据目录（Issue #978）。"""
-	return risk_error_contract(
-		code,
-		clean_command=f"boss --data-dir {_DEFAULT_DATA_DIR} clean --risk-lock",
-		doctor_command=f"boss --data-dir {_DEFAULT_DATA_DIR} doctor",
-	)[0]
-
-
-def _assert_error_contract(parsed: dict, *, code: str, message: str, recoverable: bool, recovery_action: str | list[str] | None) -> None:
+def _assert_error_contract(parsed: dict, *, code: str, message: str, recoverable: bool, recovery_action: str | None) -> None:
 	assert parsed["error"]["code"] == code
 	assert parsed["error"]["message"] == message
 	assert parsed["error"]["recoverable"] is recoverable
-	if isinstance(recovery_action, list):
-		assert shlex.split(parsed["error"]["recovery_action"]) == recovery_action
-	else:
-		assert parsed["error"]["recovery_action"] == recovery_action
+	assert parsed["error"]["recovery_action"] == recovery_action
 
 
 @patch("boss_agent_cli.commands.recruiter.candidates.get_recruiter_platform_instance")
@@ -67,8 +43,8 @@ def test_recruiter_candidates_supports_data_envelope(mock_auth_cls, mock_platfor
 	parsed = json.loads(result.output)
 	assert parsed["ok"] is True
 	assert parsed["data"]["geekList"][0]["name"] == "候选人A"
-	assert parsed["hints"]["next_actions"][0] == _hint("hr resume <geek_id> --job-id <id> --security-id <id>")
-	assert parsed["hints"]["next_actions"][1] == _hint("hr chat")
+	assert parsed["hints"]["next_actions"][0] == "boss hr resume <geek_id> --job-id <id> --security-id <id> — 查看简历"
+	assert parsed["hints"]["next_actions"][1] == "boss hr chat — 查看沟通"
 
 
 @patch("boss_agent_cli.commands.recruiter.candidates.get_recruiter_platform_instance")
@@ -159,7 +135,7 @@ def test_recruiter_chat_supports_data_envelope(mock_auth_cls, mock_platform_cls)
 	assert result.exit_code == 0
 	parsed = json.loads(result.output)
 	assert parsed["data"]["friendList"][0]["name"] == "候选人B"
-	assert parsed["hints"]["next_actions"][0] == _hint("hr resume <geek_id> --job-id <id> --security-id <id>")
+	assert parsed["hints"]["next_actions"][0] == "boss hr resume <geek_id> --job-id <id> --security-id <id> — 查看候选人简历"
 
 
 @patch("boss_agent_cli.commands.recruiter.chat.get_recruiter_platform_instance")
@@ -247,22 +223,6 @@ def test_recruiter_chatmsg_returns_history_envelope(mock_auth_cls, mock_platform
 
 @patch("boss_agent_cli.commands.recruiter.chat.get_recruiter_platform_instance")
 @patch("boss_agent_cli.commands.recruiter.chat.AuthManager")
-def test_recruiter_last_messages_empty_result_points_to_chat(mock_auth_cls, mock_platform_cls):
-	"""没有会话时不能只回空列表：Agent 需要一条可执行的后继命令。"""
-	mock_platform = _ctx_mock(mock_platform_cls)
-	mock_platform.friend_list.return_value = {"code": 200, "data": {"friendList": []}}
-
-	result = _invoke("hr", "last-messages")
-
-	assert result.exit_code == 0, result.output
-	parsed = json.loads(result.output)
-	assert parsed["data"] == {"friend_ids": [], "messages": []}
-	assert parsed["hints"]["next_actions"] == [_hint("hr chat")]
-	assert parsed["hints"]["operator_actions"]
-
-
-@patch("boss_agent_cli.commands.recruiter.chat.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.chat.AuthManager")
 def test_recruiter_last_messages_returns_batch_summary(mock_auth_cls, mock_platform_cls):
 	mock_platform = _ctx_mock(mock_platform_cls)
 	mock_platform.friend_list.return_value = {
@@ -305,7 +265,7 @@ def test_recruiter_chat_reports_error_when_platform_rejects(mock_auth_cls, mock_
 		code="TOKEN_REFRESH_FAILED",
 		message="stoken expired",
 		recoverable=True,
-		recovery_action=["boss", "--data-dir", str((Path.home() / ".boss-agent").resolve()), "login"],
+		recovery_action="boss login",
 	)
 
 
@@ -321,8 +281,8 @@ def test_recruiter_applications_supports_data_envelope(mock_auth_cls, mock_platf
 	assert result.exit_code == 0
 	parsed = json.loads(result.output)
 	assert parsed["data"]["friendList"][0]["name"] == "候选人C"
-	assert parsed["hints"]["next_actions"][0] == _hint("hr resume <geek_id> --job-id <id> --security-id <id>")
-	assert parsed["hints"]["next_actions"][1] == _hint("hr chat")
+	assert parsed["hints"]["next_actions"][0] == "boss hr resume <geek_id> --job-id <id> --security-id <id> — 查看候选人简历"
+	assert parsed["hints"]["next_actions"][1] == "boss hr chat — 查看沟通列表"
 
 
 @patch("boss_agent_cli.commands.recruiter.applications.get_recruiter_platform_instance")
@@ -337,9 +297,9 @@ def test_recruiter_applications_reports_error_when_platform_rejects(mock_auth_cl
 	_assert_error_contract(
 		parsed,
 		code="ACCOUNT_RISK",
-		message=risk_error_message("ACCOUNT_RISK"),
+		message="account risk",
 		recoverable=False,
-		recovery_action=_risk_recovery_for_default_dir("ACCOUNT_RISK"),
+		recovery_action="停止自动化访问，回到平台官网手动处理；确认目标业务页风险解除后，由用户执行 boss clean --risk-lock 并显式恢复任务，必要时联系客服",
 	)
 
 
@@ -391,7 +351,7 @@ def test_recruiter_jobs_offline_reports_error_when_platform_rejects(mock_auth_cl
 		code="TOKEN_REFRESH_FAILED",
 		message="stoken expired",
 		recoverable=True,
-		recovery_action=["boss", "--data-dir", str((Path.home() / ".boss-agent").resolve()), "login"],
+		recovery_action="boss login",
 	)
 
 
@@ -417,35 +377,6 @@ def test_recruiter_jobs_online_reports_error_when_platform_rejects(mock_auth_cls
 
 @patch("boss_agent_cli.commands.recruiter.jobs.get_recruiter_platform_instance")
 @patch("boss_agent_cli.commands.recruiter.jobs.AuthManager")
-def test_recruiter_jobs_success_paths_point_to_the_next_step(mock_auth_cls, mock_platform_cls):
-	"""hr jobs 的成功信封原先没有 hints：Agent 改完职位状态后看不出下一步。
-
-	上线 / 下线是成对动作，列表之后要点进详情，详情之后才是上下线。
-	"""
-	mock_platform = _ctx_mock(mock_platform_cls)
-	mock_platform.list_jobs.return_value = {"code": 0, "zpData": {"data": []}}
-	mock_platform.job_offline.return_value = {"code": 0}
-	mock_platform.job_online.return_value = {"code": 0}
-	mock_platform.job_detail.return_value = {"code": 0, "zpData": {"jobName": "后端工程师"}}
-
-	cases = [
-		(("hr", "jobs", "list"), [_hint("hr jobs detail <enc_job_id>")]),
-		(("hr", "jobs", "offline", "enc-job-1"), [_hint("hr jobs list"), _hint("hr jobs online enc-job-1")]),
-		(("hr", "jobs", "online", "enc-job-1"), [_hint("hr jobs list"), _hint("hr jobs offline enc-job-1")]),
-		(
-			("hr", "jobs", "detail", "enc-job-1"),
-			[_hint("hr jobs offline enc-job-1"), _hint("hr jobs online enc-job-1"), _hint("hr jobs list")],
-		),
-	]
-	for args, expected in cases:
-		result = _invoke(*args)
-		assert result.exit_code == 0, result.output
-		parsed = json.loads(result.output)
-		assert parsed["hints"]["next_actions"] == expected, args
-
-
-@patch("boss_agent_cli.commands.recruiter.jobs.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.jobs.AuthManager")
 def test_recruiter_jobs_detail_reports_error_when_platform_rejects(mock_auth_cls, mock_platform_cls):
 	mock_platform = _ctx_mock(mock_platform_cls)
 	mock_platform.job_detail.return_value = {"code": 37, "message": "stoken expired"}
@@ -460,7 +391,7 @@ def test_recruiter_jobs_detail_reports_error_when_platform_rejects(mock_auth_cls
 		code="TOKEN_REFRESH_FAILED",
 		message="stoken expired",
 		recoverable=True,
-		recovery_action=["boss", "--data-dir", str((Path.home() / ".boss-agent").resolve()), "login"],
+		recovery_action="boss login",
 	)
 
 
@@ -477,7 +408,7 @@ def test_recruiter_resume_exchange_supports_data_envelope(mock_auth_cls, mock_pl
 	parsed = json.loads(result.output)
 	assert parsed["data"]["exchangeStatus"] == "sent"
 	assert "联系方式交换请求已发送" == parsed["data"]["message"]
-	assert parsed["hints"]["next_actions"][0] == _hint("hr applications")
+	assert parsed["hints"]["next_actions"][0] == "boss hr applications — 返回候选人列表"
 	mock_platform.exchange_request_by_friend.assert_called_once_with(1, exchange_type=1)
 
 
@@ -509,7 +440,7 @@ def test_recruiter_resume_exchange_reports_error_when_platform_rejects(mock_auth
 		code="TOKEN_REFRESH_FAILED",
 		message="stoken expired",
 		recoverable=True,
-		recovery_action=["boss", "--data-dir", str((Path.home() / ".boss-agent").resolve()), "login"],
+		recovery_action="boss login",
 	)
 
 
@@ -566,7 +497,7 @@ def test_recruiter_resume_parse_supports_data_envelope(mock_auth_cls, mock_platf
 	parsed = json.loads(result.output)
 	assert parsed["data"]["basic"]["name"] == "张三"
 	assert parsed["data"]["expectation"]["position"] == "后端工程师"
-	assert parsed["hints"]["next_actions"][0] == _hint("hr applications")
+	assert parsed["hints"]["next_actions"][0] == "boss hr applications — 返回候选人列表"
 
 
 @patch("boss_agent_cli.commands.recruiter.resume.get_recruiter_platform_instance")
@@ -583,7 +514,7 @@ def test_recruiter_resume_parse_reports_error_when_platform_rejects(mock_auth_cl
 		code="TOKEN_REFRESH_FAILED",
 		message="stoken expired",
 		recoverable=True,
-		recovery_action=["boss", "--data-dir", str((Path.home() / ".boss-agent").resolve()), "login"],
+		recovery_action="boss login",
 	)
 
 
@@ -639,9 +570,9 @@ def test_recruiter_request_resume_reports_error_when_platform_rejects(mock_auth_
 	_assert_error_contract(
 		parsed,
 		code="ACCOUNT_RISK",
-		message=risk_error_message("ACCOUNT_RISK"),
+		message="account risk",
 		recoverable=False,
-		recovery_action=_risk_recovery_for_default_dir("ACCOUNT_RISK"),
+		recovery_action="停止自动化访问，回到平台官网手动处理；确认目标业务页风险解除后，由用户执行 boss clean --risk-lock 并显式恢复任务，必要时联系客服",
 	)
 
 
@@ -700,54 +631,6 @@ def test_parse_resume_reads_wasm_education_field_names():
 	assert education["end"] == "2020.06"
 
 
-@pytest.mark.parametrize(
-	("base", "expected"),
-	[
-		pytest.param({}, "", id="missing"),
-		pytest.param({"gender": None}, "", id="null"),
-		pytest.param({"gender": ""}, "", id="empty"),
-		pytest.param({"gender": "unknown"}, "", id="unknown-string"),
-		pytest.param({"gender": 99}, "", id="unknown-code"),
-		pytest.param({"gender": -1}, "", id="negative-code"),
-		pytest.param({"gender": "1"}, "", id="numeric-string"),
-		pytest.param({"gender": True}, "", id="true"),
-		pytest.param({"gender": False}, "", id="false"),
-		pytest.param({"gender": []}, "", id="list"),
-		pytest.param({"gender": {}}, "", id="object"),
-		pytest.param({"gender": 0}, "女", id="female"),
-		pytest.param({"gender": 1}, "男", id="male"),
-	],
-)
-def test_parse_resume_gender_preserves_unknown(base, expected):
-	"""缺失或未知的性别不能在结构化简历里凭空变成女（Issue #909）。"""
-	result = parse_resume({"geekDetailInfo": {"geekBaseInfo": base}})
-
-	assert result["basic"]["gender"] == expected
-
-
-@pytest.mark.parametrize("envelope", ["zpData", "data"])
-@pytest.mark.parametrize("base", [{}, {"gender": None}, {"gender": 99}], ids=["missing", "null", "unknown"])
-@patch("boss_agent_cli.commands.recruiter.resume.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.resume.AuthManager")
-def test_recruiter_resume_keeps_unknown_gender_empty(mock_auth_cls, mock_platform_cls, tmp_path, envelope, base):
-	"""缺少性别仍是有效简历，七键成功信封必须保留未知而非补全个人属性。"""
-	mock_platform = _ctx_mock(mock_platform_cls)
-	mock_platform.view_geek.return_value = {
-		"code": 0,
-		envelope: {"geekDetailInfo": {"geekBaseInfo": {"name": "示例候选人", **base}}},
-	}
-
-	result = _invoke("--data-dir", str(tmp_path), "hr", "resume", "geek-example", "--job-id", "job-example", "--security-id", "sid-example")
-
-	assert result.exit_code == 0, result.output
-	payload = json.loads(result.output)
-	assert set(payload) == {"ok", "schema_version", "command", "data", "pagination", "error", "hints"}
-	assert payload["ok"] is True
-	assert payload["data"]["basic"]["name"] == "示例候选人"
-	assert payload["data"]["basic"]["gender"] == ""
-	mock_platform.view_geek.assert_called_once_with("geek-example", "job-example", security_id="sid-example")
-
-
 def test_hr_group_rejects_removed_zhilian_platform():
 	runner = CliRunner()
 	result = runner.invoke(cli, ["--platform", "zhilian", "--json", "hr", "candidates", "python"])
@@ -755,88 +638,4 @@ def test_hr_group_rejects_removed_zhilian_platform():
 	parsed = json.loads(result.output)
 	assert parsed["ok"] is False
 	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert "不支持的平台" in parsed["error"]["message"]
-
-
-@patch("boss_agent_cli.commands.recruiter.reply.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.reply.AuthManager")
-def test_recruiter_reply_rejects_blank_message(mock_auth_cls, mock_platform_cls):
-	"""空白回复会真的作为一条空消息发到候选人会话，必须在本地拦下。"""
-	mock_platform = _ctx_mock(mock_platform_cls)
-	result = _invoke("hr", "reply", "123", "   ")
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert parsed["hints"]["next_actions"] == [_hint("hr chat")]
-	assert _hint("hr chat") in parsed["error"]["recovery_action"]
-	mock_platform.send_message_by_friend.assert_not_called()
-
-
-@patch("boss_agent_cli.commands.recruiter.jobs.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.jobs.AuthManager")
-def test_recruiter_jobs_offline_rejects_blank_job_id(mock_auth_cls, mock_platform_cls):
-	"""空 job_id 的「下线」请求不该真的发给平台。"""
-	mock_platform = _ctx_mock(mock_platform_cls)
-	result = _invoke("hr", "jobs", "offline", " ")
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert parsed["hints"]["next_actions"] == [_hint("hr jobs list")]
-	assert _hint("hr jobs list") in parsed["error"]["recovery_action"]
-	mock_platform.job_offline.assert_not_called()
-
-
-@patch("boss_agent_cli.commands.recruiter.jobs.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.jobs.AuthManager")
-def test_recruiter_jobs_online_rejects_blank_job_id(mock_auth_cls, mock_platform_cls):
-	mock_platform = _ctx_mock(mock_platform_cls)
-	result = _invoke("hr", "jobs", "online", " ")
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert parsed["hints"]["next_actions"] == [_hint("hr jobs list")]
-	assert _hint("hr jobs list") in parsed["error"]["recovery_action"]
-	mock_platform.job_online.assert_not_called()
-
-
-@patch("boss_agent_cli.commands.recruiter.jobs.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.jobs.AuthManager")
-def test_recruiter_jobs_detail_rejects_blank_enc_job_id(mock_auth_cls, mock_platform_cls):
-	mock_platform = _ctx_mock(mock_platform_cls)
-	result = _invoke("hr", "jobs", "detail", " ")
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert parsed["hints"]["next_actions"] == [_hint("hr jobs list")]
-	assert _hint("hr jobs list") in parsed["error"]["recovery_action"]
-	mock_platform.job_detail.assert_not_called()
-
-
-@patch("boss_agent_cli.commands.recruiter.resume.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.resume.AuthManager")
-def test_recruiter_resume_exchange_without_friend_id_points_at_chat(mock_auth_cls, mock_platform_cls):
-	"""缺 --friend-id 时给出可执行来源命令，而不是笼统的「修正参数」。"""
-	mock_platform = _ctx_mock(mock_platform_cls)
-	result = _invoke("hr", "resume", "--exchange")
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert parsed["error"]["recoverable"] is False
-	assert parsed["hints"]["next_actions"] == [_hint("hr chat")]
-	assert _hint("hr chat") in parsed["error"]["recovery_action"]
-	mock_platform.exchange_request_by_friend.assert_not_called()
-
-
-@patch("boss_agent_cli.commands.recruiter.resume.get_recruiter_platform_instance")
-@patch("boss_agent_cli.commands.recruiter.resume.AuthManager")
-def test_recruiter_resume_without_ids_points_at_applications(mock_auth_cls, mock_platform_cls):
-	"""缺 --job-id / --security-id 时给出可执行来源命令。"""
-	mock_platform = _ctx_mock(mock_platform_cls)
-	result = _invoke("hr", "resume")
-	assert result.exit_code == 1
-	parsed = json.loads(result.output)
-	assert parsed["error"]["code"] == "INVALID_PARAM"
-	assert parsed["error"]["recoverable"] is False
-	assert parsed["hints"]["next_actions"] == [_hint("hr applications")]
-	assert _hint("hr applications") in parsed["error"]["recovery_action"]
-	mock_platform.view_geek.assert_not_called()
+	assert "unknown platform" in parsed["error"]["message"]

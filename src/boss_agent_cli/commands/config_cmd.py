@@ -9,64 +9,16 @@ from typing import Any
 import click
 
 from boss_agent_cli.api.browser_source import POLICIES as BROWSER_SOURCES
-from boss_agent_cli.automation.config import automation_config_from_dict
-from boss_agent_cli.config import CDP_URL_REQUIREMENT, DEFAULTS, ROLES, is_valid_cdp_url, validate_request_config
-from boss_agent_cli.crawler.service import crawl_cdp_port, crawl_chrome_path, crawl_int_setting
-from boss_agent_cli.display import boss_command_for_ctx, handle_output, render_action_result, render_simple_list
-from boss_agent_cli.output import LOG_LEVELS
+from boss_agent_cli.config import DEFAULTS, validate_request_config
+from boss_agent_cli.display import handle_output, render_simple_list
 from boss_agent_cli.platforms import list_platforms
-from boss_agent_cli.services.json_files import write_json_atomic
 
 _CONFIG_CHOICES = {
 	"operating_mode": ("assisted", "research"),
 	"browser_source": tuple(BROWSER_SOURCES),
-	# 启动期会拒绝取值域之外的 role；写入时不校验的话，`config set role admin`
-	# 会报成功，之后每条命令（连 config reset 也一样）都在启动阶段失败。
-	"role": ROLES,
-	"log_level": LOG_LEVELS,
 }
 _PUBLIC_CONFIG_KEYS = tuple(key for key in DEFAULTS if key != "low_risk_mode")
 _AVAILABLE_CONFIG_MESSAGE = f"可用项: {', '.join(sorted(_PUBLIC_CONFIG_KEYS))}"
-
-
-def _hint_command(ctx: click.Context, command: str) -> str:
-	"""配置读写与修复命令沿用当前数据目录中的 config.json。"""
-	return boss_command_for_ctx(ctx, command, include_data_dir=True)
-
-
-def _emit_unknown_key(ctx: click.Context) -> None:
-	"""未知配置项：消息里列出可用项，hints 给出能看到当前值的 config list。"""
-	from boss_agent_cli.output import emit_error
-
-	emit_error(
-		"config",
-		code="INVALID_PARAM",
-		message=f"未知配置项。{_AVAILABLE_CONFIG_MESSAGE}",
-		hints={"next_actions": [_hint_command(ctx, "config list")]},
-	)
-
-
-def _emit_invalid_value(ctx: click.Context, key: str, message: str) -> None:
-	"""取值不合法：消息已说明原因，再给出查看当前值与可用项的下一步。
-
-	``config set log_level bogus`` / ``config set request_delay abc`` 原来只有中文
-	message，``recovery_action`` 是笼统的「修正参数」、``hints`` 为 null；Agent 拿不到
-	结构化的 ``config get <键>`` / ``config list``。
-	"""
-	from boss_agent_cli.output import emit_error
-
-	emit_error(
-		"config",
-		code="INVALID_PARAM",
-		message=message,
-		recovery_action=f"按提示修正 {key} 的取值；用 {_hint_command(ctx, 'config list')} 查看当前值与可用项",
-		hints={
-			"next_actions": [
-				_hint_command(ctx, f"config get {key}"),
-				_hint_command(ctx, "config list"),
-			]
-		},
-	)
 
 
 @click.group("config", invoke_without_command=True)
@@ -75,37 +27,6 @@ def config_group(ctx: click.Context) -> None:
 	"""查看和修改配置项。不带子命令时显示当前全部配置。"""
 	if ctx.invoked_subcommand is None:
 		ctx.invoke(config_list_cmd)
-
-
-def _render_config_list(data: dict[str, Any]) -> None:
-	"""TTY 下的配置列表：结构化配置在表格里占位，完整 JSON 放到表格下方。
-
-	``automation`` 的字典 repr 有二十多行，塞进 ``max_width=25`` 的单元格后既挤满
-	表格，又会把两条话术截成省略号——用户反而看不到自己配的内容。
-	"""
-	items: list[dict[str, Any]] = data["items"]
-	structured = {item["key"]: item["value"] for item in items if isinstance(item["value"], dict)}
-	rows = [
-		{**item, "value": "（JSON，见下方）" if item["key"] in structured else item["value"]}
-		for item in items
-	]
-	render_simple_list(
-		rows,
-		f"配置 ({data['config_path']})",
-		[
-			("key", "key", "cyan"),
-			("value", "value", "green"),
-			("source", "source", "dim"),
-		],
-	)
-	if not structured:
-		return
-	from boss_agent_cli import display
-
-	for key, value in structured.items():
-		display.console.print()
-		display.console.print(f"[bold]{key}[/bold]")
-		display.console.print_json(json.dumps({key: value}, ensure_ascii=False, sort_keys=True))
 
 
 @config_group.command("list")
@@ -132,42 +53,26 @@ def config_list_cmd(ctx: click.Context) -> None:
 	data = {"config_path": str(config_path), "items": items}
 	hints = {
 		"next_actions": [
-			_hint_command(ctx, "config set <键> <值>"),
-			_hint_command(ctx, "config get <键>"),
-			_hint_command(ctx, "config reset <键>"),
+			"boss config set <键> <值> — 修改配置项",
+			"boss config get <键> — 查看单个配置项",
+			"boss config reset <键> — 恢复默认值",
 		],
 	}
 	handle_output(
 		ctx,
 		"config",
 		data,
-		render=_render_config_list,
+		render=lambda d: render_simple_list(
+			d["items"],
+			f"配置 ({d['config_path']})",
+			[
+				("key", "key", "cyan"),
+				("value", "value", "green"),
+				("source", "source", "dim"),
+			],
+		),
 		hints=hints,
 	)
-
-
-def _render_config_result(data: dict[str, Any], *, title: str, next_actions: list[str]) -> None:
-	"""``config get/set/reset`` 的 TTY 渲染：结构化值改用格式化 JSON。
-
-	``automation`` 的 repr 把两段十一字段字典挤在一个面板里，单引号与折行让
-	「当前值」和「默认值 / 上一次的值」很难读，也难以对比。
-	"""
-	structured = {k: v for k, v in data.items() if isinstance(v, dict)}
-	flat = {**data, **{k: "（JSON，见下方）" for k in structured}}
-	render_action_result(flat, title=title, next_steps=next_actions)
-	if not structured:
-		return
-	payload: dict[str, Any] = {}
-	for key in ("value", "default", "previous"):
-		if key not in structured:
-			continue
-		# 与当前值相同的字段只展开一次：默认值场景下重复打印两份相同 JSON 没有信息量。
-		if key == "value" or structured[key] != structured.get("value"):
-			payload[key] = structured[key]
-	from boss_agent_cli import display
-
-	display.console.print()
-	display.console.print_json(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
 @config_group.command("get")
@@ -177,7 +82,13 @@ def config_get_cmd(ctx: click.Context, key: str) -> None:
 	"""查看单个配置项的值。"""
 	cfg = ctx.obj["config"]
 	if key not in _PUBLIC_CONFIG_KEYS:
-		_emit_unknown_key(ctx)
+		from boss_agent_cli.output import emit_error
+
+		emit_error(
+			"config",
+			code="INVALID_PARAM",
+			message=f"未知配置项。{_AVAILABLE_CONFIG_MESSAGE}",
+		)
 		ctx.exit(1)
 		return
 
@@ -186,19 +97,7 @@ def config_get_cmd(ctx: click.Context, key: str) -> None:
 		"value": cfg.get(key, DEFAULTS[key]),
 		"default": DEFAULTS[key],
 	}
-	# `render=lambda d: None` 让 TTY 下的 get / set / reset 什么都不打印：真人在终端
-	# 改完配置看不到任何确认，只能再跑一次 config list 才能确认是否生效。
-	next_actions = [
-		_hint_command(ctx, f"config set {key} <值>"),
-		_hint_command(ctx, "config list"),
-	]
-	handle_output(
-		ctx,
-		"config",
-		data,
-		render=lambda d: _render_config_result(d, title="config get", next_actions=next_actions),
-		hints={"next_actions": next_actions},
-	)
+	handle_output(ctx, "config", data, render=lambda d: None)
 
 
 @config_group.command("set")
@@ -208,7 +107,13 @@ def config_get_cmd(ctx: click.Context, key: str) -> None:
 def config_set_cmd(ctx: click.Context, key: str, value: str) -> None:
 	"""修改配置项。"""
 	if key not in _PUBLIC_CONFIG_KEYS:
-		_emit_unknown_key(ctx)
+		from boss_agent_cli.output import emit_error
+
+		emit_error(
+			"config",
+			code="INVALID_PARAM",
+			message=f"未知配置项。{_AVAILABLE_CONFIG_MESSAGE}",
+		)
 		ctx.exit(1)
 		return
 
@@ -216,65 +121,34 @@ def config_set_cmd(ctx: click.Context, key: str, value: str) -> None:
 	user_cfg = _load_user_overrides(config_path)
 
 	try:
-		parsed_value = _parse_value(key, value, DEFAULTS[key])
-		if key == "automation":
-			# config.json 是 agent run/train 的直接输入，先用正式解析器校验内容，
-			# 避免把非法枚举或数值写进去后，运行时才在依赖内部抛 traceback。
-			try:
-				automation_config_from_dict(parsed_value)
-			except (TypeError, ValueError) as exc:
-				raise ValueError(f"automation 配置无效: {exc}") from exc
-		if key == "crawl":
-			# 与 crawl run/start 和向导采集共用同一组校验：注定被拒绝的值在写入时
-			# 就报错，而不是落盘后每次运行都返回 INVALID_PARAM。
-			try:
-				crawl_int_setting(parsed_value, "max_requests", 20)
-				crawl_int_setting(parsed_value, "max_details", 50)
-				crawl_int_setting(parsed_value, "max_seconds", 600)
-				crawl_int_setting(parsed_value, "max_retries", 1, minimum=0)
-				crawl_chrome_path(parsed_value.get("chrome_path"))
-				raw_port = parsed_value.get("cdp_port")
-				if raw_port is not None:
-					crawl_cdp_port(raw_port)
-			except (TypeError, ValueError) as exc:
-				raise ValueError(f"crawl 配置无效: {exc}") from exc
+		parsed_value = _parse_value(value, DEFAULTS[key])
 		if key.startswith("request_") or key == "batch_greet_delay":
 			# Validate the edited field without preventing repairs of other bad fields.
 			validate_request_config({**DEFAULTS, key: parsed_value})
-		if key == "cdp_url" and parsed_value is not None and not is_valid_cdp_url(parsed_value):
-			# 启动期按同一规则拒绝坏地址：写进去会让之后每条命令都启动失败，
-			# 连 `config get` 也只能靠 config 子命令的豁免勉强可用。
-			raise ValueError(f"{CDP_URL_REQUIREMENT}，收到 {parsed_value!r}")
 	except (TypeError, ValueError) as exc:
-		_emit_invalid_value(ctx, key, str(exc))
+		from boss_agent_cli.output import emit_error
+
+		emit_error("config", code="INVALID_PARAM", message=str(exc))
 		ctx.exit(1)
 		return
 	choices = list_platforms() if key == "platform" else _CONFIG_CHOICES.get(key)
 	if choices is not None and parsed_value not in choices:
-		_emit_invalid_value(ctx, key, f"{key} 必须是以下值之一: {', '.join(choices)}")
+		from boss_agent_cli.output import emit_error
+
+		emit_error(
+			"config",
+			code="INVALID_PARAM",
+			message=f"{key} 必须是以下值之一: {', '.join(choices)}",
+		)
 		ctx.exit(1)
 		return
 	user_cfg[key] = parsed_value
 	if key == "operating_mode":
 		user_cfg.pop("low_risk_mode", None)
-	try:
-		_save_user_overrides(config_path, user_cfg)
-	except OSError as exc:
-		_emit_write_error(config_path, exc)
-		return
+	_save_user_overrides(config_path, user_cfg)
 
 	data = {"key": key, "value": parsed_value, "previous": ctx.obj["config"].get(key)}
-	next_actions = [
-		_hint_command(ctx, f"config get {key}"),
-		_hint_command(ctx, "config list"),
-	]
-	handle_output(
-		ctx,
-		"config",
-		data,
-		render=lambda d: _render_config_result(d, title="config set", next_actions=next_actions),
-		hints={"next_actions": next_actions},
-	)
+	handle_output(ctx, "config", data, render=lambda d: None)
 
 
 @config_group.command("reset")
@@ -283,31 +157,23 @@ def config_set_cmd(ctx: click.Context, key: str, value: str) -> None:
 def config_reset_cmd(ctx: click.Context, key: str) -> None:
 	"""将配置项恢复为默认值。"""
 	if key not in _PUBLIC_CONFIG_KEYS:
-		_emit_unknown_key(ctx)
+		from boss_agent_cli.output import emit_error
+
+		emit_error(
+			"config",
+			code="INVALID_PARAM",
+			message=f"未知配置项。{_AVAILABLE_CONFIG_MESSAGE}",
+		)
 		ctx.exit(1)
 		return
 
 	config_path = ctx.obj["data_dir"] / "config.json"
 	user_cfg = _load_user_overrides(config_path)
 	user_cfg.pop(key, None)
-	try:
-		_save_user_overrides(config_path, user_cfg)
-	except OSError as exc:
-		_emit_write_error(config_path, exc)
-		return
+	_save_user_overrides(config_path, user_cfg)
 
 	data = {"key": key, "value": DEFAULTS[key], "restored": True}
-	next_actions = [
-		_hint_command(ctx, f"config get {key}"),
-		_hint_command(ctx, "config list"),
-	]
-	handle_output(
-		ctx,
-		"config",
-		data,
-		render=lambda d: _render_config_result(d, title="config reset", next_actions=next_actions),
-		hints={"next_actions": next_actions},
-	)
+	handle_output(ctx, "config", data, render=lambda d: None)
 
 
 def _load_user_overrides(config_path: Path) -> dict[str, Any]:
@@ -324,27 +190,14 @@ def _load_user_overrides(config_path: Path) -> dict[str, Any]:
 
 def _save_user_overrides(config_path: Path, user_cfg: dict[str, Any]) -> None:
 	"""保存用户配置到文件。"""
-	# 原子写：写一半被中断的 config.json 会让所有命令卡在启动阶段。
-	write_json_atomic(config_path, user_cfg, trailing_newline=True)
+	config_path.parent.mkdir(parents=True, exist_ok=True)
+	with open(config_path, "w", encoding="utf-8") as f:
+		json.dump(user_cfg, f, ensure_ascii=False, indent=2)
+		f.write("\n")
 
 
-def _emit_write_error(config_path: Path, exc: OSError) -> None:
-	"""配置文件写不进去时给信封：目录只读、路径被同名文件占用都不该变成 traceback。"""
-	from boss_agent_cli.output import emit_error
-
-	emit_error(
-		"config",
-		code="LOCAL_IO_ERROR",
-		message=f"写入 {config_path} 失败: {exc.strerror or exc}",
-	)
-
-
-def _parse_value(key: str, raw: str, default: Any) -> Any:
-	"""根据默认值类型推断并转换输入值。
-
-	转换失败要说明是哪个配置项、收到的是什么：裸的 ``int(raw)`` / ``float(raw)``
-	只会把 ``could not convert string to float: 'abc'`` 这种英文原文抛给用户。
-	"""
+def _parse_value(raw: str, default: Any) -> Any:
+	"""根据默认值类型推断并转换输入值。"""
 	if default is None:
 		if raw.lower() in ("null", "none", ""):
 			return None
@@ -352,33 +205,12 @@ def _parse_value(key: str, raw: str, default: Any) -> Any:
 	if isinstance(default, bool):
 		return raw.lower() in ("true", "1", "yes")
 	if isinstance(default, int):
-		try:
-			return int(raw)
-		except ValueError as exc:
-			raise ValueError(f"{key} 必须是整数，收到 {raw!r}") from exc
+		return int(raw)
 	if isinstance(default, float):
-		try:
-			return float(raw)
-		except ValueError as exc:
-			raise ValueError(f"{key} 必须是数值，收到 {raw!r}") from exc
-	if isinstance(default, dict):
-		# automation / crawl 这类结构化配置不是标量：直接存字符串会让后续读取方
-		# （如 automation_config_from_dict）在 .get() 上崩溃。这里只接受 JSON object。
-		try:
-			parsed = json.loads(raw)
-		except json.JSONDecodeError as exc:
-			raise ValueError(
-				"结构化配置项必须以 JSON object 传值，例如 '{\"mode\": \"training\"}'"
-			) from exc
-		if not isinstance(parsed, dict):
-			raise ValueError("结构化配置项的值必须是 JSON object")
-		return parsed
+		return float(raw)
 	if isinstance(default, list):
 		parts = raw.split(",")
 		if all(isinstance(d, (int, float)) for d in default):
-			try:
-				return [float(p.strip()) for p in parts]
-			except ValueError as exc:
-				raise ValueError(f"{key} 必须是逗号分隔的数值列表，例如 '1.5,3.0'，收到 {raw!r}") from exc
+			return [float(p.strip()) for p in parts]
 		return [p.strip() for p in parts]
 	return raw
